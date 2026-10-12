@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mu-lang"
+name = "mu-language"
 version = "0.10.0"
 description = "mu: a small indentation language that transpiles to Python, with a hook for a project's helper library"
 readme = "README.md"

@@ -8,7 +8,7 @@ The Python it produces is plain and runs anywhere; the transpiler pastes
 in the source of every helper the file calls.
 
 ```
-pip install mu-lang
+pip install mu-language
 python -m mulang file.mu        # the Python
 python -m mulang --fmt file.mu  # the file, formatted
 python -m mulang.repl           # a REPL
