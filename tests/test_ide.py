@@ -1,0 +1,145 @@
+"""mulang.ide: hover, completion, go-to-definition and signature help answer
+on a file that is mid-edit, through the transpiled Python and its line map."""
+
+import json
+import os
+import subprocess
+import sys
+
+import pydsa.grid
+
+from mulang import ide
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+
+# line 7 is half typed, line 8 never closes its bracket
+TEXT = """# a drill
+def largestOfLastK(nums: [int], k: int) -> [int]
+  res = []
+  memo f(i, j) =
+    | i == 0 -> 0
+    | else -> f(i - 1, j)
+  for >i, n in nums
+    if x ==
+    d = nbrs(grid, i,
+    res <- f(i, 0)
+  res
+
+res = largestOfLastK([1], 1)
+"""
+
+
+def req(cmd, line, col, text=TEXT):
+    return {"id": 1, "cmd": cmd, "root": REPO, "text": text, "line": line, "col": col}
+
+
+def test_an_unclosed_bracket_blanks_its_logical_line():
+    assert ide.unclosed(TEXT.split("\n"))[1] == {8}
+    assert ide.unclosed("x = f(a,\n      b)\ny = 1".split("\n"))[1] == set()
+    assert ide.unclosed("x = f(a,\n b))\ny = 1".split("\n"))[1] == {0, 1}
+
+
+def test_repair_blanks_only_the_broken_lines():
+    code, origin, blanked = ide.repaired(TEXT.split("\n"))
+    assert blanked == {7, 8}
+    assert "res.append(f(i, 0))" in code
+    assert origin[-1] == 13  # `res = largestOfLastK([1], 1)` is mu line 13, 1-based
+
+
+def test_hover_gives_mu_types():
+    assert ide.hover(req("hover", 1, 20))["contents"] == "```mu\nnums: [int]\n```"
+    assert ide.hover(req("hover", 1, 32))["contents"] == "```mu\nk: int\n```"
+    assert ide.hover(req("hover", 2, 3))["contents"] == "```mu\nres: [int]\n```"
+    assert ide.hover(req("hover", 6, 10))["contents"] == "```mu\nn: int\n```"
+
+
+def test_hover_on_a_def_of_the_file_shows_its_line():
+    assert ide.hover(req("hover", 9, 12))["contents"] == "```mu\nmemo f(i, j) =\n```"
+
+
+def test_hover_on_a_helper_shows_its_def_and_docstring():
+    got = ide.hover(req("hover", 8, 10))["contents"]
+    assert got.startswith("```mu\nnbrs(grid, r, c=None, dirs=CARDINALS")
+    assert "# The cells (r + dr, c + dc)" in got
+
+
+def test_hover_on_nothing():
+    assert ide.hover(req("hover", 0, 0)) is None  # a comment
+    assert ide.hover(req("hover", 7, 4)) is None  # the half-typed `if`
+
+
+def test_definition_of_a_name_is_its_mu_line():
+    assert ide.definition(req("definition", 9, 4)) == [
+        {"path": None, "line": 2, "col": 2}
+    ]
+    assert ide.definition(req("definition", 9, 12)) == [
+        {"path": None, "line": 3, "col": 7}
+    ]
+
+
+def test_definition_of_a_helper_is_its_source():
+    [d] = ide.definition(req("definition", 8, 10))
+    assert d["path"] == pydsa.grid.__file__
+    assert "def nbrs(" in open(d["path"]).read().split("\n")[d["line"]]
+
+
+def test_completion_lists_scope_keywords_and_helpers():
+    labels = {c["label"] for c in ide.complete(req("complete", 7, 4))}
+    assert {"nums", "k", "res", "f", "n", "while", "memo", "nbrs", "table"} <= labels
+    assert "self" not in labels
+
+
+def test_preloaded_names_are_the_library_and_the_environment():
+    names = ide.preloaded()
+    assert {"nbrs", "heap", "build_tree", "ListNode"} <= set(names)
+    assert not {"deque", "Counter", "cache", "inf"} & set(names)
+
+
+def test_completion_lists_every_preloaded_name():
+    labels = {c["label"] for c in ide.complete(req("complete", 7, 4))}
+    missing = set(ide.preloaded()) - labels
+    assert not missing, sorted(missing)
+
+
+def test_completion_of_an_environment_name_shows_its_def():
+    text = TEXT.replace("    if x ==\n", "    linked_list\n")
+    got = ide.complete(req("complete", 7, 15, text))
+    assert [c["label"] for c in got] == ["linked_list_reverse_k"]
+    assert got[0]["detail"].startswith("linked_list_reverse_k(h, k=inf)  # Reverse")
+
+
+def test_completion_filters_by_the_prefix():
+    text = TEXT.replace("    if x ==\n", "    nb\n")
+    got = ide.complete(req("complete", 7, 6, text))
+    assert [c["label"] for c in got] == ["nbrs"]
+    assert got[0]["detail"].startswith("nbrs(grid, r, c=None")
+
+
+def test_signature_inside_a_call():
+    got = ide.signature(req("signature", 8, 18))
+    assert got["label"].startswith("nbrs(grid, r, c=None")
+    assert got["active"] == 1
+    assert got["doc"].startswith("nbrs(grid, r, c=None")
+    assert ide.signature(req("signature", 2, 3)) is None
+
+
+def test_a_bad_request_is_an_error_reply_not_a_crash():
+    assert ide.answer({"id": 3, "cmd": "hover", "text": "", "line": 5, "col": 0}) == {
+        "id": 3,
+        "result": None,
+    }
+    assert "error" in ide.answer({"id": 4, "cmd": "nope", "text": ""})
+
+
+def test_serve_round_trip():
+    run = subprocess.run(
+        [sys.executable, "-m", "mulang.ide"],
+        input=json.dumps(req("hover", 1, 20)) + "\n",
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        timeout=60,
+    )
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["result"]["contents"] == "```mu\nnums: [int]\n```"

@@ -1,0 +1,227 @@
+{
+  "name": "mu",
+  "scopeName": "source.mu",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#decorator"
+    },
+    {
+      "include": "#def"
+    },
+    {
+      "include": "#class"
+    },
+    {
+      "include": "#memo"
+    },
+    {
+      "include": "#fold"
+    },
+    {
+      "include": "#default"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#item"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#builtin"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#call"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.mu",
+      "match": "#.*$"
+    },
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.mu",
+          "begin": "[fFrRbB]{0,2}'''",
+          "end": "'''"
+        },
+        {
+          "name": "string.quoted.double.mu",
+          "begin": "[fFrRbB]{0,2}\"\"\"",
+          "end": "\"\"\""
+        },
+        {
+          "name": "string.quoted.single.mu",
+          "match": "[fFrRbB]{0,2}'[^'\\n]*'"
+        },
+        {
+          "name": "string.quoted.double.mu",
+          "match": "[fFrRbB]{0,2}\"[^\"\\n]*\""
+        }
+      ]
+    },
+    "decorator": {
+      "match": "^\\s*(@)\\s*([A-Za-z_][\\w.]*)",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.decorator.mu"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.mu"
+        }
+      }
+    },
+    "def": {
+      "match": "\\b(def)\\s+([A-Za-z_]\\w*)",
+      "captures": {
+        "1": {
+          "name": "storage.type.function.mu"
+        },
+        "2": {
+          "name": "entity.name.function.mu"
+        }
+      }
+    },
+    "class": {
+      "match": "^\\s*(class)\\s+([A-Za-z_]\\w*)(?:\\s+(extends)\\s+([A-Za-z_][\\w.]*))?",
+      "captures": {
+        "1": {
+          "name": "storage.type.class.mu"
+        },
+        "2": {
+          "name": "entity.name.type.class.mu"
+        },
+        "3": {
+          "name": "storage.modifier.mu"
+        },
+        "4": {
+          "name": "entity.other.inherited-class.mu"
+        }
+      }
+    },
+    "memo": {
+      "match": "\\b(memo)\\s+([A-Za-z_]\\w*)",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.memo.mu"
+        },
+        "2": {
+          "name": "entity.name.function.mu"
+        }
+      }
+    },
+    "fold": {
+      "match": "\\b(sum|max|min|count)\\s+(?=(for|from)\\b)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.fold.mu"
+        }
+      }
+    },
+    "default": {
+      "match": "(\\{)\\s*(:)\\s*([A-Za-z_]\\w*)?",
+      "captures": {
+        "2": {
+          "name": "keyword.operator.default.mu"
+        },
+        "3": {
+          "name": "support.type.mu"
+        }
+      }
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.import.mu",
+          "match": "^\\s*(import|from|extends)\\b"
+        },
+        {
+          "name": "keyword.control.mu",
+          "match": "\\bret\\b(?=\\s+[A-Za-z_]\\w*\\s*(,|=(?!=)))"
+        },
+        {
+          "name": "keyword.control.mu",
+          "match": "\\b(for|in|if|elif|else|while|return|yield|break|continue|pass|del|assert)\\b"
+        },
+        {
+          "name": "keyword.other.mu",
+          "match": "\\b(from)\\b|\\bfirst\\b(?=\\s+[A-Za-z_]\\w*\\s+in\\b)"
+        },
+        {
+          "name": "keyword.operator.logical.mu",
+          "match": "\\b(and|or|not|is)\\b"
+        }
+      ]
+    },
+    "constant": {
+      "name": "constant.language.mu",
+      "match": "\\b(true|false|none|inf)\\b"
+    },
+    "item": {
+      "name": "variable.language.item.mu",
+      "match": "\\b_\\b"
+    },
+    "number": {
+      "name": "constant.numeric.mu",
+      "match": "\\b\\d+(\\.\\d+)?(?!\\.\\d)"
+    },
+    "builtin": {
+      "name": "support.function.builtin.mu",
+      "match": "\\b(len|max|min|sum|abs|sort|sorted|scan|counter|ceil|floor|as_list|cells|nbrs|table|like|shape|put|row|col|set_row|set_col|pairs|levels|adjacency|indegrees|components|graph|dijkstra|Graph|heap|maxheapify|maxheapitems|maxheappeek|maxheappop|maxheappush|maxheappushpop|maxheapreplace|to_digits|to_int|even|odd|in_bounds|is_edge|edges|grid_bfs|triples|ceil_div|first_true|last_true|first_false|last_false|min_chunks|Multiset|GraphNode|ListNode|Node|TreeNode|avoids|batched|build_general_tree|build_graph|build_graph_from_edge_list|build_linked_list|build_nary_tree|build_tree|count_pairs|debug_var|debug_vars|draw_ascii_graph|draw_general_tree|draw_graph|draw_graphviz|draw_heap|draw_linked_list|draw_tree|find_node|folds|generate_and_print_random_bst|generate_full_binary_tree|generate_random_tree|get_adj_list|get_general_tree|get_inorder|get_level_order|get_list_values|is_balanced|is_valid_bst|lcs|linked_list_reverse_k|pprint|print_linked_list|run_with_input|same_rows|same_seq|tabulate|uses|viz_binary_search)\\b(?=\\s*[(\\w'\\\"])"
+    },
+    "type": {
+      "name": "support.type.mu",
+      "match": "\\b(int|str|char|bool|float)\\b"
+    },
+    "call": {
+      "match": "\\b([A-Za-z_]\\w*)(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.call.mu"
+        }
+      }
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pop.mu",
+          "match": "\\.(?!\\.)(?=\\s*(?:$|#|[^\\w\\s.]|(?:if|else|and|or|for|in|is|not|from)\\b))"
+        },
+        {
+          "name": "keyword.operator.range.mu",
+          "match": "\\.\\.<|\\.\\."
+        },
+        {
+          "name": "keyword.operator.arrow.mu",
+          "match": "->|<-"
+        },
+        {
+          "name": "keyword.operator.case.mu",
+          "match": "^\\s*\\|"
+        },
+        {
+          "name": "keyword.operator.mu",
+          "match": "<<=|>>=|\\*\\*=|//=|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<|>>|//|\\*\\*|[-+*/%<>=&|^~?]"
+        }
+      ]
+    }
+  }
+}
