@@ -6,3 +6,4 @@ build/
 node_modules/
 CLAUDE.md
 .ruff_cache/
+.envrc
