@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mu-language"
-version = "0.10.0"
+version = "0.10.1"
 description = "mu: a small indentation language that transpiles to Python, with a hook for a project's helper library"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,10 @@ classifiers = [
     "Topic :: Software Development :: Compilers",
 ]
 dependencies = ['tomli; python_version < "3.11"']
+
+[project.scripts]
+mu = "mulang.__main__:cli"
+mu-repl = "mulang.repl:main"
 
 [project.urls]
 Homepage = "https://github.com/shyal/mu"

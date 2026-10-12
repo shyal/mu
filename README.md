@@ -9,9 +9,9 @@ in the source of every helper the file calls.
 
 ```
 pip install mu-language
-python -m mulang file.mu        # the Python
-python -m mulang --fmt file.mu  # the file, formatted
-python -m mulang.repl           # a REPL
+mu file.mu        # the Python
+mu --fmt file.mu  # the file, formatted
+mu-repl           # a REPL
 ```
 
 ## Spec

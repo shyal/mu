@@ -221,8 +221,10 @@ def plain_input():
         import readline
 
         readline.parse_and_bind("tab: insert-tab")
-        if os.path.exists(history):
+        try:
             readline.read_history_file(history)
+        except OSError:  # no history yet, or one libedit cannot parse
+            pass
         atexit.register(readline.write_history_file, history)
     except ImportError:
         pass

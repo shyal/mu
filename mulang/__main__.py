@@ -1,4 +1,4 @@
-"""python -m mulang [--fmt] FILE|-, or --version."""
+"""mu [--fmt] FILE|-, or --version. Also python -m mulang."""
 
 import sys
 
@@ -24,5 +24,9 @@ def main(args):
         sys.exit(f"{args[0]}: {err}")
 
 
-if __name__ == "__main__":
+def cli():
     main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    cli()
