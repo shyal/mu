@@ -210,6 +210,24 @@ RUNTIME = {
             list.__setitem__(self, k, v)''',
         "A list of rows that also takes a (row, col) pair as an index.",
     ),
+    "cache": Helper(
+        (),
+        (),
+        '''def cache(fn):
+    """Memoise fn on its arguments. Pure Python, so a deep memo recursion
+    is not cut short by the C recursion limit of Python 3.12 and 3.13."""
+    memo = {}
+
+    def cached(*args, **kwargs):
+        key = (args, tuple(sorted(kwargs.items()))) if kwargs else args
+        if key not in memo:
+            memo[key] = fn(*args, **kwargs)
+        return memo[key]
+
+    cached.__name__, cached.__doc__, cached.__wrapped__ = fn.__name__, fn.__doc__, fn
+    return cached''',
+        "Memoise fn on its arguments, in pure Python, so deep recursion fits.",
+    ),
     "deep": Helper(
         ("import threading",),
         (),
@@ -844,7 +862,7 @@ class Parser:
     def memo_stmt(self):
         self.expect("memo")
         self.memo_used = True
-        self.need("from functools import cache")
+        self.need(helper="cache")
         self.need("import sys")
         self.need(helper="deep")
         name = self.expect_kind("NAME")
