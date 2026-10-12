@@ -8,6 +8,8 @@ from . import VERSION, MuError, fmt, profile, transpile
 def main(args):
     if args == ["--version"]:
         sys.exit(print(f"mu {VERSION}"))
+    if args in (["-h"], ["--help"]):
+        sys.exit(print(__doc__))
     run = transpile
     if args[:1] == ["--fmt"]:
         run, args = fmt, args[1:]

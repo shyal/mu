@@ -9,11 +9,22 @@ description = "mu: a small indentation language that transpiles to Python, with 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Shyal" }]
+keywords = ["language", "transpiler", "python"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Compilers",
+]
 dependencies = ['tomli; python_version < "3.11"']
+
+[project.urls]
+Homepage = "https://github.com/shyal/mu"
+Repository = "https://github.com/shyal/mu"
 
 [project.optional-dependencies]
 ide = ["jedi"]
-test = ["pytest", "jedi", "dsa-py"]
+test = ["pytest", "jedi"]
 
 [tool.setuptools.packages.find]
 include = ["mulang*"]

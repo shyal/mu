@@ -47,9 +47,10 @@ def test_helpers_load_on_use(repl):
 
 
 def test_errors(repl):
-    assert repl.run("1 // 0") == [
-        "ZeroDivisionError: integer division or modulo by zero"
-    ]
+    assert repl.run("1 // 0") in (
+        ["ZeroDivisionError: integer division or modulo by zero"],
+        ["ZeroDivisionError: division by zero"],  # 3.14
+    )
     assert repl.run("x = ")[0].startswith("syntax:")
     assert repl.run("y")[0] == "NameError: name 'y' is not defined"
 

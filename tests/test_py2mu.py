@@ -1,6 +1,7 @@
 """py2mu: one test per idiom, with the exact mu it writes and a run of the
 transpiled result; then a few cached problems against their asserts."""
 
+import builtins
 import subprocess
 import textwrap
 
@@ -261,6 +262,8 @@ CASES = {
 
 @pytest.mark.parametrize("case", CASES, ids=list(CASES))
 def test_idiom(case):
+    if case == "nbrs and levels" and not hasattr(builtins, "deque"):
+        pytest.skip("needs the leet harness, whose sitecustomize preloads deque")
     body, want, value = CASES[case]
     got = mu_of(body)
     want = textwrap.indent(textwrap.dedent(want).lstrip("\n"), "  ")
@@ -302,6 +305,8 @@ def test_attributes_stay_shared():
 
 
 def test_preloaded_imports_go():
+    if not hasattr(builtins, "deque"):
+        pytest.skip("needs the leet harness, whose sitecustomize preloads deque")
     got = mu_of("import heapq\nfrom collections import deque\nreturn 1")
     assert "import" not in got
 

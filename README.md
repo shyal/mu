@@ -34,7 +34,7 @@ profile = "mu/leetmu.py"
 `python -m mulang`, the REPL, `py2mu` and the ide load it from the
 working directory, or from the workspace root the ide is asked about.
 The first profile is the LeetCode one in the `leet` repo, whose library
-is the [pydsa](../pydsa) package.
+is the `pydsa` package (not yet published).
 
 ## Tools
 
@@ -52,3 +52,7 @@ is the [pydsa](../pydsa) package.
 pip install -e '.[test]'
 pytest
 ```
+
+The tests also need `pydsa`, the leet profile's library, on the path. Two of
+them run only under the leet harness, whose `sitecustomize` preloads the names
+LeetCode preloads; elsewhere they skip.
