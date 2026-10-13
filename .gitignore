@@ -7,3 +7,6 @@ node_modules/
 CLAUDE.md
 .ruff_cache/
 .envrc
+*.vsix
+vscode/node_modules/
+vscode/package-lock.json

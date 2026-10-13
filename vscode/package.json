@@ -2,8 +2,25 @@
   "name": "mu",
   "displayName": "mu",
   "description": "Highlighting, formatting, hover, completion, go-to-definition, signature help and debugging for mu, a small language that transpiles to Python",
-  "version": "0.0.1",
-  "publisher": "leet",
+  "version": "0.1.0",
+  "publisher": "shyal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shyal/mu.git",
+    "directory": "vscode"
+  },
+  "homepage": "https://github.com/shyal/mu/tree/master/vscode",
+  "bugs": {
+    "url": "https://github.com/shyal/mu/issues"
+  },
+  "keywords": [
+    "mu",
+    "python",
+    "transpiler",
+    "leetcode",
+    "debugger"
+  ],
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -135,5 +152,13 @@
   },
   "extensionDependencies": [
     "ms-python.debugpy"
-  ]
+  ],
+  "scripts": {
+    "test": "node --test adapter.test.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
 }

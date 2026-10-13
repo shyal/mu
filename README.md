@@ -43,8 +43,29 @@ is the `pydsa` package (not yet published).
 - `mulang.py2mu`: a Python solution written as mu, in as few lines as the
   language allows.
 - `vscode/`: the VS Code extension (highlighting, formatter, the ide, a
-  debugger that steps through the mu file). Link it into
-  `~/.vscode/extensions` and reload the window.
+  debugger that steps through the mu file). Install the `.vsix` from the
+  latest `vscode-v*` release, or link the folder into
+  `~/.vscode/extensions` and reload the window. See
+  [vscode/README.md](vscode/README.md).
+
+## Releasing
+
+PyPI: bump `version` in `pyproject.toml`, then `uv build` and
+`uv publish dist/*` with `UV_PUBLISH_TOKEN` set (`.envrc`).
+
+Editor extension: bump `version` in `vscode/package.json` and add a line to
+`vscode/CHANGELOG.md`, then tag and push:
+
+```
+git tag vscode-v0.1.0 && git push origin vscode-v0.1.0
+```
+
+The `vscode` workflow runs the adapter tests, packages the `.vsix`, checks
+the tag against `package.json`, and attaches the `.vsix` to a GitHub
+release. A pull request that touches `vscode/` runs the same steps without
+releasing. The extension is on neither registry: the VS Code Marketplace
+needs a Microsoft account and Open VSX an Eclipse account, and neither
+would open one.
 
 ## Tests
 
