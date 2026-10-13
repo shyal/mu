@@ -25,8 +25,10 @@ mu-repl = "mulang.repl:main"
 [project.urls]
 Homepage = "https://github.com/shyal/mu"
 Repository = "https://github.com/shyal/mu"
+Documentation = "https://www.shyal.com/mu/"
 
 [project.optional-dependencies]
+docs = ["mkdocs-material>=9.5"]
 ide = ["jedi"]
 test = ["pytest", "jedi"]
 

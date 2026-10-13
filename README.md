@@ -1,5 +1,7 @@
 # mu
 
+Documentation: [www.shyal.com/mu](https://www.shyal.com/mu/)
+
 mu is a small language that transpiles to Python. A file is indented
 blocks without colons, calls of one argument without brackets, `..`
 ranges, `x -> ...` lambdas, `<-` push, folds (`sum for x in xs: f(x)`),

@@ -1,0 +1,56 @@
+site_name: mu
+site_description: a small indentation language that transpiles to Python
+site_url: https://www.shyal.com/mu/
+repo_url: https://github.com/shyal/mu
+repo_name: shyal/mu
+edit_uri: ""
+strict: true
+
+nav:
+  - Home: index.md
+  - Specification:
+      - "0.10": spec/v0.10.md
+      - "0.9": spec/v0.9.md
+      - "0.8": spec/v0.8.md
+      - "0.7": spec/v0.7.md
+      - "0.6": spec/v0.6.md
+      - "0.5": spec/v0.5.md
+      - "0.4": spec/v0.4.md
+      - "0.3": spec/v0.3.md
+      - "0.2": spec/v0.2.md
+      - "0.1": spec/v0.1.md
+  - Editor extension: vscode/README.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
