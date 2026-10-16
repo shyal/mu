@@ -761,15 +761,17 @@ class Printer:
 
     def params(self, fn, typed):
         a = fn.args
-        if a.vararg or a.kwarg or a.kwonlyargs or a.defaults or a.posonlyargs:
+        if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
             raise Untranslatable(f"no mu form for the parameters of {fn.name}")
+        defaults = [None] * (len(a.args) - len(a.defaults)) + a.defaults
         out = []
-        for p in a.args:
+        for p, d in zip(a.args, defaults):
             if p.arg == "self":
                 continue
             quoted = isinstance(p.annotation, ast.Constant)  # not defined yet
             t = mu_type(p.annotation) if typed and not quoted else None
-            out.append(p.arg if t is None else f"{p.arg}: {t}")
+            head = p.arg if t is None else f"{p.arg}: {t}"
+            out.append(head if d is None else f"{head}={self.arg(d)}")
         return ", ".join(out)
 
     def def_(self, fn, ind, typed=False):

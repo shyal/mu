@@ -408,3 +408,13 @@ def test_decorators_mu_cannot_say_are_refused(decorators):
     src = f"class Solution:\n    {decorators}\n    def f(n):\n        return n\n"
     with pytest.raises(Untranslatable, match="decorators of f"):
         translate(src)
+
+
+def test_parameter_defaults_translate():
+    got = mu_of(
+        "return len(xs) if reverse else by(len(xs))",
+        sig="f(self, xs: List[int], by=lambda x: x, reverse: bool = False) -> int",
+    )
+    assert "def f(xs: [int], by=x -> x, reverse: bool=false) -> int" in got
+    runs(got, "f([1, 2], reverse=True)", 2)
+    runs(got, "f([1, 2], by=lambda n: n * 10)", 20)

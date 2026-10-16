@@ -372,6 +372,25 @@ def test_a_prime_is_refused_off_a_value_side():
         transpile("def f(n: int) -> int\n  a = k' + n = 3\n")
 
 
+def test_a_parameter_may_have_a_default():
+    src = (
+        "def f(xs: [int], by=x -> x, reverse: bool=false) -> [int]\n"
+        "  ys = [by(x) for x in xs]\n"
+        "  if reverse\n"
+        "    ys = [-y for y in ys]\n"
+        "  [*scan(max, map(sub, ys[1:], scan(min, ys)))]\n"
+    )
+    out = transpile(src)
+    assert "by=lambda x: x, reverse: bool = False" in out
+    ns = {}
+    exec("from operator import sub\n" + out, ns)
+    assert ns["f"]([12, 6, 1, 2, 7]) == [-6, -5, 1, 6]
+    assert ns["f"]([12, 6, 1, 2, 7], reverse=True) == [6, 11, 11, 11]
+    assert fmt(src) == src
+    with pytest.raises(MuError, match="`k` needs a default"):
+        transpile("def f(n=1, k) -> int\n  n + k\n")
+
+
 def test_one_conversion_alone_is_the_value_of_a_last_line():
     src = "def f(n: int) -> int\n  sum(ds) = to_digits(n)\n"
     assert run(src, 123) == 6

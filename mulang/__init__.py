@@ -194,6 +194,7 @@ class Py(str):
         None  # (a, op, b) when the expression is exactly a op b
     )
     cond = False  # a conditional expression, `a if c else b`, unbracketed
+    default = None  # a parameter's default value, `by=x -> x`
 
 
 class TargetError(MuError):
@@ -862,11 +863,19 @@ class Parser:
         self.expect("(")
         params = []
         while not self.at(")"):
-            p = self.expect_kind("NAME")
+            p = Py(self.expect_kind("NAME"))
             t = None
             if self.at(":"):
                 self.next()
                 t = self.type()
+            if self.at("="):
+                # a default: `by=x -> x`, `reverse: bool = false`
+                self.next()
+                p.default = self.arg()
+            elif any(q.default is not None for q, _ in params):
+                raise MuError(
+                    f"line {self.peek()[2]}: `{p}` needs a default, as the parameters before it have one"
+                )
             params.append((p, t))
             if not self.at(")"):
                 self.expect(",")
@@ -1905,7 +1914,7 @@ class Emitter:
         top = not self.scopes  # a method, or a top-level function
         names = {p for p, _ in params}
         sig = ["self"] * (self.method and top)
-        sig += [p if t is None else f"{p}: {t}" for p, t in params]
+        sig += [param(p, t) for p, t in params]
         arrow = f" -> {ret}" if ret else ""
         self.decorators(s, ind)
         if is_memo(s):
@@ -1983,6 +1992,16 @@ class Emitter:
             self.out(ind + 1, f"{acc} = {op}({acc}, {val})")
         if last:
             self.out(ind, last.format(acc))
+
+
+def param(p, t):
+    """One parameter of a def's signature: `xs`, `xs: list[int]`, `by=None`,
+    `reverse: bool = False`."""
+    head = p if t is None else f"{p}: {t}"
+    d = getattr(p, "default", None)
+    if d is None:
+        return head
+    return f"{head}={d}" if t is None else f"{head} = {d}"
 
 
 def bound_anywhere(stmts):
