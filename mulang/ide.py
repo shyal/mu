@@ -574,7 +574,37 @@ def signature(req):
     }
 
 
+SEMANTIC = ("variable", "operator", "number", "string", "keyword")
+
+
+def primes(req):
+    """[line, col, length, kind] for each token of a stretch where `f'`, `r'`
+    or `b'` reads as a prime. The grammar cannot see which names are bound,
+    so it colours that stretch as a string; these tokens colour it again.
+    Empty while the file does not parse."""
+    text = req["text"]
+    try:
+        p, _ = mulang.parsed(text, mulang.Parser.program)
+    except MuError:
+        return []
+    plain = {(n, v.col): v for k, v, n in mulang.tokenize(text) if k == "STR"}
+    words = mulang.KEYWORDS | mulang.STATEMENT_WORDS
+    out = []
+    for line, col in sorted(p.primes):
+        end = col + len(plain[(line, col)])
+        for kind, val, n in mulang.tokenize(text, p.primes):
+            if n != line or not isinstance(val, mulang.Col) or not col <= val.col < end:
+                continue
+            if kind == "NAME":
+                kind = "keyword" if val in words else "variable"
+            else:
+                kind = {"NUM": "number", "STR": "string"}.get(kind, "operator")
+            out.append([n - 1, val.col, len(val), kind])
+    return out
+
+
 COMMANDS = {
+    "primes": primes,
     "hover": hover,
     "complete": complete,
     "definition": definition,

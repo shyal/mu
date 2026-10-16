@@ -265,6 +265,9 @@ const KINDS = {
   property: vscode.CompletionItemKind.Property,
 };
 
+// the token types of the "primes" answer, in mulang.ide.SEMANTIC's order
+const LEGEND = new vscode.SemanticTokensLegend(["variable", "operator", "number", "string", "keyword"]);
+
 const fenced = (text) => new vscode.MarkdownString("```mu\n" + text + "\n```");
 
 // The language features, each one request to the backend. A definition
@@ -273,6 +276,22 @@ function providers(ide) {
   const location = (document, d) =>
     new vscode.Location(d.path ? vscode.Uri.file(d.path) : document.uri, new vscode.Position(d.line, d.col));
   return [
+    // `f'`, `r'` and `b'` on a bound name are primes, which the grammar
+    // colours as a string: the backend colours that stretch again
+    vscode.languages.registerDocumentSemanticTokensProvider(
+      "mu",
+      {
+        async provideDocumentSemanticTokens(document) {
+          const r = await ide.request("primes", document, new vscode.Position(0, 0));
+          const tokens = new vscode.SemanticTokensBuilder(LEGEND);
+          for (const [line, col, length, kind] of r || []) {
+            tokens.push(line, col, length, LEGEND.tokenTypes.indexOf(kind));
+          }
+          return tokens.build();
+        },
+      },
+      LEGEND
+    ),
     vscode.languages.registerHoverProvider("mu", {
       async provideHover(document, position) {
         const r = await ide.request("hover", document, position);

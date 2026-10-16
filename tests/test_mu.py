@@ -329,6 +329,49 @@ def test_a_value_side_needs_a_new_name():
         transpile("def f(p: [int]) -> int\n  ret r = a * b = p\n")
 
 
+def test_a_prime_binds_a_bound_name_again_on_a_value_side():
+    # 121. Best Time to Buy and Sell Stock
+    src = (
+        "def f(prices: [int]) -> int\n"
+        "  min_price, max_profit = inf, 0\n"
+        "  for price in prices\n"
+        "    max_profit = max(price - min_price', max_profit) = min(min_price, price)\n"
+        "  max_profit\n"
+    )
+    out = transpile(src)
+    assert "min_price = min(min_price, price)" in out
+    assert "max_profit = max(price - min_price, max_profit)" in out
+    assert run(src, [7, 1, 5, 3, 6, 4]) == 5
+    assert fmt(src) == src
+
+
+def test_a_prime_after_f_r_or_b_needs_the_name_bound():
+    # f is bound: f' is a prime, even with a second quote on the line
+    src = (
+        "def f(xs: [int]) -> int\n"
+        "  f, best = 0, 0\n"
+        "  for x in xs\n"
+        "    best = max(best, f' - x) = max(f, x)\n"
+        "  best\n"
+    )
+    out = transpile(src)
+    assert "f = max(f, x)" in out and "best = max(best, f - x)" in out
+    assert run(src, [3, 1, 4]) == 2
+    # nothing binds r: r'...' is a raw string, as before
+    assert "r'a\\b'" in transpile("def f() -> str\n  r'a\\b'\n")
+    # a string after a name with a space stays a string
+    assert run("def f(s: str) -> str\n  s + 'x'\n", "a") == "ax"
+
+
+def test_a_prime_is_refused_off_a_value_side():
+    with pytest.raises(MuError, match="line 2: `n'` marks a name bound again"):
+        transpile("def f(n: int) -> int\n  n' + 1\n")
+    with pytest.raises(MuError, match="`n'` is a target"):
+        transpile("def f(n: int) -> int\n  n' = a + b = 3\n")
+    with pytest.raises(MuError, match="`k'` marks a name bound again, but k is not"):
+        transpile("def f(n: int) -> int\n  a = k' + n = 3\n")
+
+
 def test_one_conversion_alone_is_the_value_of_a_last_line():
     src = "def f(n: int) -> int\n  sum(ds) = to_digits(n)\n"
     assert run(src, 123) == 6

@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.10"
+VERSION = "0.11"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is"}
 # names that end a call written without brackets
@@ -69,6 +69,7 @@ TOKEN = re.compile(
     r"(?P<ws>[ \t]+)"
     r"|(?P<comment>#.*)"
     r"|(?P<num>\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?)"
+    r"|(?P<prime>(?<=\w)')"
     r"|(?P<str>[fFrRbB]{0,2}'[^'\n]*'|[fFrRbB]{0,2}\"[^\"\n]*\")"
     r"|(?P<name>[A-Za-z_]\w*)"
     r"|(?P<op>\.\.<|\.\.|->|<-|//=|<<=|>>=|\*\*=|==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^="
@@ -83,6 +84,15 @@ class MuError(Exception):
     def __init__(self, msg, eof=False):
         super().__init__(msg)
         self.eof = eof  # the input ended early: more lines may complete it
+
+
+class Reprime(Exception):
+    """`f'`, `r'` or `b'` met as a string while that name is bound: parse
+    again with the name and a PRIME there."""
+
+    def __init__(self, at):
+        super().__init__(at)
+        self.at = at  # (line, column)
 
 
 def triple(lines, k, pos):
@@ -104,8 +114,24 @@ def triple(lines, k, pos):
             raise MuError(f"line {first + 1}: unclosed {quote} string", eof=True)
 
 
-def tokenize(src):
-    """Tokens are (kind, value, line). Blocks are marked by INDENT and DEDENT."""
+PREFIXED = re.compile(r"[fFrRbB]{1,2}'(?!'')")
+# what a prime-marked name compiles to before the line that binds it again
+# takes the mark off: `min_price'` is __mu_prime__min_price until then
+PRIMED = "__mu_prime__"
+
+
+class Col(str):
+    """A token's text that remembers the column it starts at."""
+
+    col = 0
+
+
+def tokenize(src, primes=frozenset()):
+    """Tokens are (kind, value, line). Blocks are marked by INDENT and DEDENT.
+    A `'` directly after a letter, a digit or `_` is a PRIME token,
+    `min_price'`. `f'`, `r'` and `b'` start a string, unless (line, column)
+    of the name is in primes: the parser asks for that when the name is
+    bound."""
     toks, indents, depth = [], [0], 0
     lines, k = src.splitlines(), -1
     while k + 1 < len(lines):
@@ -132,14 +158,18 @@ def tokenize(src):
                 line = lines[k]
                 toks.append(("STR", text, n))
                 continue
-            m = TOKEN.match(line, pos)
+            if (n, pos) in primes:
+                m = NAME.match(line, pos)
+            else:
+                m = TOKEN.match(line, pos)
             if not m:
                 raise MuError(f"line {n}: unexpected character {line[pos]!r}")
-            pos = m.end()
-            kind = m.lastgroup
+            start, pos = pos, m.end()
+            kind = m.lastgroup or "name"
             if kind in ("ws", "comment"):
                 continue
-            val = m.group()
+            val = Col(m.group())
+            val.col = start
             if val in "([{":
                 depth += 1
             elif val in ")]}":
@@ -509,9 +539,12 @@ def mu_type(node):
 
 
 class Parser:
-    def __init__(self, src):
-        self.toks = tokenize(src)
+    def __init__(self, src, primes=frozenset(), strings=frozenset()):
+        self.toks = tokenize(src, primes)
+        self.primes = primes  # (line, column) of each `f'` read as a prime
+        self.strings = strings  # (line, column) of an `f'` that stays a string
         self.i = 0
+        self.primed = {}  # name -> the first line that marks it with a prime
         self.at_line = {}  # id(stmt) -> the mu line it starts on, for the debugger
         self.bare = set()  # helper names used without a call: sort(ds, by=even)
         self.imports = set()
@@ -791,10 +824,23 @@ class Parser:
         seen = global_names().union(*self.known)
         out, waiting, val = [], [], rhs
         for side in reversed(sides):
+            marked = re.findall(PRIMED + r"(\w+)", side)
+            side = Py(side.replace(PRIMED, ""))
             if not computed(side, seen):
+                if marked:
+                    raise MuError(
+                        f"line {line}: `{marked[0]}'` is a target; a prime marks"
+                        " a name bound again on a value side of `=`"
+                    )
                 waiting.insert(0, side)
                 continue
-            names = [n for n in free_names(side) if n not in seen]
+            for name in marked:
+                if name not in set().union(*self.known):
+                    raise MuError(
+                        f"line {line}: `{name}'` marks a name bound again,"
+                        f" but {name} is not bound yet"
+                    )
+            names = [n for n in free_names(side) if n not in seen or n in marked]
             if not names:
                 read = ", ".join(free_names(side))
                 why = f"{read} already defined" if read else "it names nothing"
@@ -1230,9 +1276,20 @@ class Parser:
     def primary(self):
         t = self.peek()
         kind, val = t[0], t[1]
+        if kind == "STR" and PREFIXED.match(val):
+            name = val[: val.index("'")]
+            at = (t[2], val.col)
+            if name in set().union(*self.known) and at not in self.strings:
+                raise Reprime(at)
         if kind in ("NUM", "STR"):
             self.next()
             return Py(val)
+        if kind == "NAME" and self.peek(1)[0] == "PRIME":
+            # `min_price'`: the new value of a bound name, on a value side
+            self.next()
+            self.next()
+            self.primed.setdefault(val, t[2])
+            return Py(PRIMED + val)
         if kind == "NAME":
             if val in FOLDS and (self.at("for", 1) or self.at("from", 1)):
                 return self.fold()
@@ -1953,8 +2010,7 @@ def spread(e):
 def transpile(src, mapped=False):
     """The Python for a mu file. With mapped, also a list with one entry per
     output line: the mu line it comes from, or None for a pasted helper."""
-    p = Parser(src)
-    tops = p.program()
+    p, tops = parsed(src, Parser.program)
     if any(t and t.startswith("list[list[") for d in grid_defs(tops) for _, t in d[2]):
         p.need(helper="Grid")
     # a helper passed by name, `sort(ds, by=even)`, is pasted like one called,
@@ -1995,6 +2051,31 @@ def transpile(src, mapped=False):
     return code, origin
 
 
+def parsed(src, run, primes=frozenset(), strings=frozenset()):
+    """(parser, run(parser)) for src. A string `f'...'` met where f is bound
+    is read as a prime instead: the file is tokenized again with that `'`
+    split out, and parsed again. If that reading fails, the string stays a
+    string. A prime left outside a value side of `=` is an error."""
+    while True:
+        p = Parser(src, primes, strings)
+        try:
+            out = run(p)
+        except Reprime as again:
+            try:
+                return parsed(src, run, primes | {again.at}, strings)
+            except MuError:
+                strings |= {again.at}
+                continue
+        left = repr((out, getattr(p, "globals", []), getattr(p, "script", [])))
+        for name, line in p.primed.items():
+            if PRIMED + name in left:
+                raise MuError(
+                    f"line {line}: `{name}'` marks a name bound again;"
+                    " it goes on a value side of `=`"
+                )
+        return p, out
+
+
 def grid_defs(stmts):
     """The defs that take grids: top-level defs and the methods of classes."""
     out = []
@@ -2009,8 +2090,7 @@ def grid_defs(stmts):
 def compile_stmts(src, last="_ = {}"):
     """Top-level statements to Python, for the REPL: (imports, helpers, code).
     The value of a final expression goes through `last`."""
-    p = Parser(src)
-    stmts = p.statements()
+    p, stmts = parsed(src, Parser.statements)
     if any(t and t.startswith("list[list[") for d in grid_defs(stmts) for _, t in d[2]):
         p.need(helper="Grid")
     e = Emitter()
@@ -2034,6 +2114,8 @@ def gap(prev, cur, unary, subscript, paren=False):
     if paren and "=" in (pv, cv) and "OP" in (pk, ck):
         if (pk, pv) == ("OP", "=") or (ck, cv) == ("OP", "="):
             return ""
+    if ck == "PRIME":
+        return ""
     if ck == "COMMENT" or ck == "POP":
         return "  " if ck == "COMMENT" else " "
     if "TERN" in (pk, ck):

@@ -6,6 +6,9 @@
       "include": "#comment"
     },
     {
+      "include": "#prime"
+    },
+    {
       "include": "#string"
     },
     {
@@ -60,21 +63,21 @@
       "patterns": [
         {
           "name": "string.quoted.single.mu",
-          "begin": "[fFrRbB]{0,2}'''",
+          "begin": "(?<!\\w)[fFrRbB]{0,2}'''",
           "end": "'''"
         },
         {
           "name": "string.quoted.double.mu",
-          "begin": "[fFrRbB]{0,2}\"\"\"",
+          "begin": "(?<!\\w)[fFrRbB]{0,2}\"\"\"",
           "end": "\"\"\""
         },
         {
           "name": "string.quoted.single.mu",
-          "match": "[fFrRbB]{0,2}'[^'\\n]*'"
+          "match": "(?<!\\w)[fFrRbB]{0,2}'[^'\\n]*'"
         },
         {
           "name": "string.quoted.double.mu",
-          "match": "[fFrRbB]{0,2}\"[^\"\\n]*\""
+          "match": "(?<!\\w)[fFrRbB]{0,2}\"[^\"\\n]*\""
         }
       ]
     },
@@ -222,6 +225,10 @@
           "match": "<<=|>>=|\\*\\*=|//=|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<|>>|//|\\*\\*|[-+*/%<>=&|^~?]"
         }
       ]
+    },
+    "prime": {
+      "name": "keyword.operator.prime.mu",
+      "match": "(?<=\\w)'"
     }
   }
 }

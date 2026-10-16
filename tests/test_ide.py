@@ -143,3 +143,23 @@ def test_serve_round_trip():
     )
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["result"]["contents"] == "```mu\nnums: [int]\n```"
+
+
+def test_primes_colours_a_bound_f_read_as_a_prime():
+    # two primes: the grammar sees f' - g' as an f-string
+    text = (
+        "def h(xs: [int]) -> int\n"
+        "  f, g, best = 0, 0, 0\n"
+        "  for x in xs\n"
+        "    best = max(best, f' - g') = (max(f, x), min(g, x))\n"
+        "  best\n"
+    )
+    assert ide.primes({"text": text}) == [
+        [3, 21, 1, "variable"],  # f
+        [3, 22, 1, "operator"],  # its prime
+        [3, 24, 1, "operator"],  # -
+        [3, 26, 1, "variable"],  # g
+        [3, 27, 1, "operator"],  # its prime
+    ]
+    # f is the def's name, but f'{a}' reads only as a string
+    assert ide.primes({"text": "def f(a: str) -> str\n  f'{a}'\n"}) == []
