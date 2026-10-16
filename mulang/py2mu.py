@@ -131,9 +131,10 @@ class Normalize(ast.NodeTransformer):
 
 class Canon(ast.NodeTransformer):
     """What the comparison ignores: load or store, keyword order, the
-    wrapper that lets mu's (a, b) -> e also take one pair, and the 0 that
+    wrapper that lets mu's (a, b) -> e also take one pair, the 0 that
     visit_Call puts in front of range(n), which `for >i in xs` writes
-    back as range(len(xs))."""
+    back as range(len(xs)), and the list a fold hands to sum, max or min
+    where the Python passed a generator."""
 
     @staticmethod
     def pair_lambda(node):
@@ -193,6 +194,13 @@ class Canon(ast.NodeTransformer):
             node.keywords.sort(key=lambda k: k.arg or "")
             if call_name(node) == "range" and len(node.args) == 1:
                 node.args.insert(0, ast.Constant(0))
+            if call_name(node) in ("sum", "max", "min"):
+                node.args = [
+                    ast.GeneratorExp(a.elt, a.generators)
+                    if isinstance(a, ast.ListComp)
+                    else a
+                    for a in node.args
+                ]
         return node
 
 

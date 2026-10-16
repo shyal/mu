@@ -1734,18 +1734,22 @@ class Parser:
             self.next()
             body = self.expr()
         cond = f" if {where}" if where else ""
+        # a list, not a generator: sum, max and min are C functions, and a
+        # generator they pull from puts every level of a memo's recursion
+        # through C, which Python 3.12 and 3.13 cut short whatever
+        # sys.setrecursionlimit says. A comprehension runs inline.
         if op == "count":
             test = " and ".join(f"({c})" for c in (where, body) if c)
-            gen = f"1 for {tgt} in {it}" + (f" if {test}" if test else "")
+            gen = f"[1 for {tgt} in {it}" + (f" if {test}" if test else "") + "]"
             return Py(f"({start} + sum({gen}))" if start else f"sum({gen})")
         if body is None:
             raise MuError(f"line {self.peek()[2]}: {op} for needs ': value' or a block")
-        gen = f"{body} for {tgt} in {it}{cond}"
+        gen = f"[{body} for {tgt} in {it}{cond}]"
         if op == "sum":
             return Py(f"({start} + sum({gen}))" if start else f"sum({gen})")
         if start is None:
             return Py(f"{op}({gen})")
-        return Py(f"{op}({start}, {op}(({gen}), default={start}))")
+        return Py(f"{op}({start}, {op}({gen}, default={start}))")
 
     def first(self):
         """first k in lo..hi if pred: the least k with pred true (pred monotone)."""

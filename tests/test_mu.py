@@ -433,7 +433,7 @@ def test_a_fold_that_names_no_variable_reads_the_item_as_underscore(body, want):
 def test_a_fold_over_an_attribute_call_names_no_variable():
     src = "def f(d: {str: int}) -> int\n  sum for d.values(): _\n"
     out = transpile(src)
-    assert "sum(_ for _ in d.values())" in out
+    assert "sum([_ for _ in d.values()])" in out
     ns = {}
     exec(out, ns)
     assert ns["f"]({"a": 2, "b": 5}) == 7
@@ -687,6 +687,19 @@ def test_memo_block_form_is_a_cached_def_on_a_deep_stack():
     exec(py, ns)
     assert ns["f"](20000) == 20000
     assert fmt(src) == src
+
+
+def test_a_fold_in_a_memo_recurses_deep_on_every_python():
+    # 322. Coin Change: the fold's min would pull a generator through C at
+    # every level, which Python 3.12 and 3.13 stop short of depth 10000
+    src = (
+        "def f(coins: [int], amount: int) -> int\n"
+        "  memo g(a) = a == 0 ? 0 : 1 + min from inf for c in coins if c <= a: g(a - c)\n"
+        "  g(amount) or -1 if inf\n"
+    )
+    assert "min([g(a - c) for c in coins if c <= a], default=inf)" in transpile(src)
+    assert run(src, [1], 20000) == 20000
+    assert run(src, [7, 11, 13], 10000) == 770
 
 
 def test_memo_block_form_rejects_ret():
@@ -988,7 +1001,7 @@ def test_c_style_conditional():
     assert "return (1 if y else 2) if x else 3" in one("x ? (y ? 1 : 2) : 3")
     assert "return (1 if y else 2) if x else 3" in one("x ? y ? 1 : 2 : 3")
     assert "{1: 2 if x else 3}" in one("{1: x ? 2 : 3}")
-    assert "sum(x if x > 0 else -x for x in [x, y])" in one(
+    assert "sum([x if x > 0 else -x for x in [x, y]])" in one(
         "sum for x in [x, y]: x > 0 ? x : -x"
     )
     assert "[1][0 if x else 1]" in one("[1][x ? 0 : 1]")
