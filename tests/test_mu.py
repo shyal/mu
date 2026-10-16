@@ -1010,3 +1010,183 @@ def test_the_formatter_spaces_a_conditional_and_keeps_a_type_tight():
         fmt("y = sum for x in xs: x>0?x:-x\n")
         == "y = sum for x in xs: x > 0 ? x : -x\n"
     )
+
+
+def test_with_try_and_raise_are_blocks_without_colons():
+    src = (
+        "def f(path: str) -> str\n"
+        "  try\n"
+        "    with open(path) as fh\n"
+        "      text = fh.read()\n"
+        "  except OSError as e\n"
+        "    raise ValueError(path) from e\n"
+        "  else\n"
+        "    text.upper()\n"
+        "  finally\n"
+        "    log <- path\n"
+    )
+    out = transpile(src)
+    assert "    with open(path) as fh:\n" in out
+    assert "    except OSError as e:\n        raise ValueError(path) from e\n" in out
+    assert "    else:\n        return text.upper()\n    finally:\n" in out
+    ns = {"log": []}
+    exec(out, ns)
+    assert ns["f"](__file__).startswith('"""THE LANGUAGE')
+    with pytest.raises(ValueError):
+        ns["f"]("/no/such/file")
+    assert ns["log"] == [__file__, "/no/such/file"]
+    assert fmt(src) == src
+    with pytest.raises(MuError, match="needs an except or a finally"):
+        transpile("def f()\n  try\n    1\n  g()\n")
+
+
+def test_a_def_takes_star_args_keyword_only_and_star_star_kwargs():
+    src = (
+        "def f(a, *rest: int, k=1, **kw) -> int\n"
+        "  a + sum(rest) * k + len(kw)\n"
+        "\n"
+        "def g(*, n)\n"
+        "  f(*[1, 2], **{'k': n, 'z': 0})\n"
+    )
+    out = transpile(src)
+    assert "def f(a, *rest: int, k=1, **kw) -> int:" in out
+    assert "def g(*, n):" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["g"](n=10) == 1 + 2 * 10 + 1
+    assert fmt(src) == src
+
+
+def test_python_operators_and_literals_for_numeric_code():
+    src = (
+        "def f(x, y)\n"
+        "  global seen\n"
+        "  seen = 0xff + 0b1 + 0o7\n"
+        "  first, *rest = x @ y\n"
+        "  if (n := len(rest)) > 0\n"
+        "    return n\n"
+        "  rest\n"
+    )
+    out = transpile(src)
+    assert "first, *rest = x @ y" in out and "if (n := len(rest)) > 0:" in out
+
+    class M:
+        def __matmul__(self, other):
+            return [1, 2, 3]
+
+    ns = {}
+    exec(out, ns)
+    assert ns["f"](M(), None) == 2 and ns["seen"] == 263
+    assert fmt(src) == src
+
+
+def test_subscripts_take_ellipsis_and_several_slices():
+    out = transpile("def f(x)\n  x[..., :2] = 0\n  x[:, none, -1]\n")
+    assert "x[..., :2] = 0" in out and "return x[:, None, -1]" in out
+    assert fmt("y = x[...,:2]\n") == "y = x[..., :2]\n"
+
+
+def test_typed_assignments_and_dataclass_fields():
+    src = (
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass\n"
+        "class Config\n"
+        "  n_layer: int = 12\n"
+        "  name: str? = none\n"
+        "  sizes: [int]\n"
+        "\n"
+        "class Net extends Config, object\n"
+        '  def depth() -> "Net"\n'
+        "    self\n"
+    )
+    out = transpile(src)
+    assert "    n_layer: int = 12\n    name: Optional[str] = None\n" in out
+    assert "class Net(Config, object):" in out
+    ns = {}
+    exec(out.replace("    sizes: list[int]\n", ""), ns)
+    assert ns["Net"](name="x").depth().n_layer == 12
+
+
+def test_adjacent_strings_join_and_a_dict_unpacks():
+    out = transpile("def f(d)\n  {**d, 'k': 'a' 'b'}\n")
+    assert "return {**d, 'k': 'a' 'b'}" in out
+
+
+def test_a_staticmethod_takes_no_self_and_a_classmethod_takes_cls():
+    src = (
+        "class C\n"
+        "  @staticmethod\n"
+        "  def make(n)\n"
+        "    n * 2\n"
+        "\n"
+        "  @classmethod\n"
+        "  def build(n)\n"
+        "    cls.make(n)\n"
+    )
+    out = transpile(src)
+    assert "def make(n):" in out and "def build(cls, n):" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["C"].build(4) == 8
+    assert fmt(src) == src
+
+
+def test_one_line_defs_in_a_row_stay_together():
+    src = (
+        "class V\n"
+        "  def __neg__(): self * -1\n"
+        "  def __radd__(other): self + other\n"
+        "\n"
+        "  def backward() -> none\n"
+        "    pass\n"
+    )
+    assert fmt(src) == src
+
+
+def test_fmt_keeps_the_line_breaks_of_a_long_or_commented_bracket():
+    src = (
+        "config_args = {\n"
+        "  'gpt2': dict(n_layer=12, n_head=12, n_embd=768),  # 124M params\n"
+        "  'gpt2-medium': dict(n_layer=24, n_head=16, n_embd=1024),\n"
+        "}[model_type]\n"
+    )
+    assert fmt(src) == src
+    assert "'gpt2-medium'" in transpile(src)
+    messy = src.replace("  'gpt2-m", "        'gpt2-m").replace("}[", "  }[")
+    assert fmt(messy) == src
+    # short and without a comment, it is joined as before
+    assert fmt("x = [1,\n  2]\n") == "x = [1, 2]\n"
+
+
+def test_a_module_docstring_stays_first_and_a_string_method_drops_brackets():
+    src = '"""Doc."""\n\nd = {:list}\nx = ", ".join map(str, [1, 2])\n'
+    out = transpile(src)
+    assert out.startswith('"""Doc."""\n')
+    ns = {}
+    exec(out, ns)
+    assert ns["__doc__"] == "Doc." and ns["x"] == "1, 2"
+
+
+def test_a_generator_returns_nothing_after_its_last_line():
+    out = transpile("def f()\n  yield 1\n  g()\n")
+    assert "return g()" not in out and "    g()" in out
+
+
+def test_star_star_keeps_its_place_among_named_arguments():
+    out = transpile("x = f(1, a=2, **kw, b=3)\n")
+    assert "f(1, a=2, **kw, b=3)" in out
+
+
+def test_a_lambda_may_be_a_branch_of_a_conditional():
+    out = transpile("def f(c)\n  g = c ? x -> x + 1 : () -> none\n  g\n")
+    assert "g = (lambda x: x + 1) if c else lambda: None" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["f"](True)(1) == 2 and ns["f"](False)() is None
+
+
+def test_a_type_may_be_a_python_generic():
+    out = transpile("from typing import Optional\nx: Optional[str] = none\ny: dict[str, [int]] = {}\n")
+    assert "x: Optional[str] = None" in out
+    assert "y: dict[str, list[int]] = {}" in out

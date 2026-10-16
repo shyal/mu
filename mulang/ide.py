@@ -52,6 +52,7 @@ KEYWORDS = sorted(
     | {"break", "continue", "pass", "del", "assert", "yield", "from", "import"}
     | {"extends", "and", "or", "not", "is", "true", "false", "none", "inf"}
     | {"first", "sum", "max", "min", "count", "lambda"}
+    | {"with", "as", "try", "except", "finally", "raise", "global", "nonlocal"}
 )
 TRIES = 200
 

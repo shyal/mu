@@ -26,13 +26,14 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.11"
+VERSION = "0.12"
 
-KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is"}
+KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that end a call written without brackets
 NOT_ARGS = {"from", "in", "not", "and", "or", "if", "else", "is", "for", "while"}
 NOT_ARGS |= {"elif", "def", "memo", "return", "del", "assert", "pass", "break"}
 NOT_ARGS |= {"continue", "import", "extends", "yield", "class"}
+NOT_ARGS |= {"as", "with", "try", "except", "finally", "raise", "global", "nonlocal"}
 AUGMENTED = {
     "=",
     "+=",
@@ -47,6 +48,7 @@ AUGMENTED = {
     "^=",
     "<<=",
     ">>=",
+    "@=",
 }
 IN_PLACE = {
     "+=": "iadd",
@@ -61,6 +63,7 @@ IN_PLACE = {
     "^=": "ixor",
     "<<=": "ilshift",
     ">>=": "irshift",
+    "@=": "imatmul",
 }
 FOLDS = {"sum", "max", "min", "count"}
 CONSTANTS = {"true": "True", "false": "False", "none": "None"}
@@ -68,11 +71,12 @@ CONSTANTS = {"true": "True", "false": "False", "none": "None"}
 TOKEN = re.compile(
     r"(?P<ws>[ \t]+)"
     r"|(?P<comment>#.*)"
-    r"|(?P<num>\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?)"
+    r"|(?P<num>0[xX][\da-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+"
+    r"|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?)"
     r"|(?P<prime>(?<=\w)')"
     r"|(?P<str>[fFrRbB]{0,2}'[^'\n]*'|[fFrRbB]{0,2}\"[^\"\n]*\")"
     r"|(?P<name>[A-Za-z_]\w*)"
-    r"|(?P<op>\.\.<|\.\.|->|<-|//=|<<=|>>=|\*\*=|==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^="
+    r"|(?P<op>\.\.\.|\.\.<|\.\.|->|<-|//=|<<=|>>=|\*\*=|==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|@=|:="
     r"|<<|>>|//|\*\*|[-+*/%<>=()\[\]{},:|.&^~?@])"
 )
 
@@ -195,6 +199,7 @@ class Py(str):
     )
     cond = False  # a conditional expression, `a if c else b`, unbracketed
     default = None  # a parameter's default value, `by=x -> x`
+    star = ""  # a parameter's `*` or `**`: `*args`, `**kwargs`
 
 
 class TargetError(MuError):
@@ -603,6 +608,10 @@ class Parser:
         top-level def is a plain function."""
         tops, self.globals, self.script = [], [], []
         self.script_line = None  # where the script starts
+        self.docstring = None  # a string the file opens with, its __doc__
+        if self.peek()[0] == "STR" and self.peek(1)[0] == "NEWLINE":
+            self.docstring = self.next()[1]
+            self.next()
         while self.peek()[0] != "EOF":
             t = self.peek()
             if self.script_line is None and (self.at("import") or self.at("from")):
@@ -611,7 +620,10 @@ class Parser:
                 tops.append(self.stmt())
             else:
                 for s in flat(self.stmt()):
-                    if not tops and s[0] == "assign":
+                    # an assignment after a script line stays in the script,
+                    # where it runs in its turn
+                    lead = not tops and self.script_line is None
+                    if lead and s[0] in ("assign", "annassign"):
                         self.globals.append(s)
                     else:
                         if self.script_line is None:
@@ -713,6 +725,10 @@ class Parser:
         if self.at("while"):
             self.next()
             return ("while", self.expr(), self.block(), self.loop_else())
+        if self.at("with"):
+            return self.with_stmt()
+        if self.at("try"):
+            return self.try_stmt()
         if self.at("if"):
             arms = []
             self.next()
@@ -746,6 +762,49 @@ class Parser:
                 raise MuError(f"line {t[2]}: a ret line takes one plain assignment")
             return ("assign", *s[1:], name)
         return self.simple(newline=True)
+
+    def with_stmt(self):
+        """`with a() as x, b()`, then its block: Python's with, no colon."""
+        self.expect("with")
+        items = []
+        while True:
+            e = self.expr()
+            if self.at("as"):
+                self.next()
+                tgt = self.pattern()
+                self.known[-1] |= set(NAME.findall(tgt))
+                e = Py(f"{e} as {tgt}")
+            items.append(e)
+            if not self.at(","):
+                break
+            self.next()
+        return ("with", ", ".join(items), self.block())
+
+    def try_stmt(self):
+        """`try`, its block, then `except [E [as e]]` blocks, an `else` and a
+        `finally`, each a header on its own line, as in Python."""
+        self.expect("try")
+        body, handlers = self.block(), []
+        while self.at("except"):
+            line = self.next()[2]
+            head = ""
+            if not self.at(":") and self.peek()[0] != "NEWLINE":
+                head = self.expr()
+                if self.at("as"):
+                    self.next()
+                    name = self.expect_kind("NAME")
+                    self.known[-1].add(name)
+                    head = f"{head} as {name}"
+            handlers.append((head, self.headed(self.block(), line)))
+        other = self.loop_else()
+        final = None
+        if self.at("finally"):
+            line = self.next()[2]
+            final = self.headed(self.block(), line)
+        if not handlers and final is None:
+            t = self.peek()
+            raise MuError(f"line {t[2]}: a try needs an except or a finally")
+        return ("try", body, handlers, other, final)
 
     def loop_else(self):
         """The block of an `else`: a loop's, run when the loop ends without
@@ -781,6 +840,21 @@ class Parser:
         elif self.at("assert"):
             self.next()
             s = ("assert", self.exprlist())
+        elif self.at("raise"):
+            self.next()
+            val = None if self.peek()[0] == "NEWLINE" else self.expr()
+            if val is not None and self.at("from"):
+                self.next()
+                val = Py(f"{val} from {self.expr()}")
+            s = ("raise", val)
+        elif self.at("global") or self.at("nonlocal"):
+            kind = self.next()[1]
+            names = [self.expect_kind("NAME")]
+            while self.at(","):
+                self.next()
+                names.append(self.expect_kind("NAME"))
+            self.known[-1] |= set(names)
+            s = (kind, ", ".join(names))
         else:
             line = self.peek()[2]
             lhs = self.exprlist()
@@ -788,6 +862,16 @@ class Parser:
                 # push: `stack <- x` appends x
                 self.next()
                 s = ("push", f"{lhs}.append({self.expr()})")
+            elif self.at(":"):
+                # `n_layer: int = 12`: a typed assignment, or a field `x: T`
+                self.next()
+                t = self.type()
+                val = None
+                if self.at("="):
+                    self.next()
+                    val = self.arg() if self.lambda_ahead() else self.exprlist()
+                self.known[-1] |= targets(lhs)
+                s = ("annassign", lhs, t, val)
             elif self.peek()[1] in AUGMENTED and self.peek()[0] == "OP":
                 op = self.next()[1]
                 rhs = (
@@ -861,18 +945,31 @@ class Parser:
         self.expect("def")
         name = self.expect_kind("NAME")
         self.expect("(")
-        params = []
+        params, keyword_only = [], False
         while not self.at(")"):
+            star = self.next()[1] if self.at("*") or self.at("**") else ""
+            if star == "*" and (self.at(",") or self.at(")")):
+                # a bare `*`: the parameters after it are named in the call
+                p = Py("")
+                p.star, keyword_only = "*", True
+                params.append((p, None))
+                if not self.at(")"):
+                    self.expect(",")
+                continue
             p = Py(self.expect_kind("NAME"))
+            p.star = star
+            keyword_only = keyword_only or star == "*"
             t = None
             if self.at(":"):
                 self.next()
                 t = self.type()
-            if self.at("="):
+            if self.at("=") and not star:
                 # a default: `by=x -> x`, `reverse: bool = false`
                 self.next()
                 p.default = self.arg()
-            elif any(q.default is not None for q, _ in params):
+            elif not star and not keyword_only and any(
+                q.default is not None for q, _ in params
+            ):
                 raise MuError(
                     f"line {self.peek()[2]}: `{p}` needs a default, as the parameters before it have one"
                 )
@@ -902,10 +999,11 @@ class Parser:
         base = None
         if self.at("extends"):
             self.next()
-            base = self.expect_kind("NAME")
-            while self.at("."):
+            bases = [self.dotted()]
+            while self.at(","):
                 self.next()
-                base += "." + self.expect_kind("NAME")
+                bases.append(self.dotted())
+            base = ", ".join(bases)
         self.known[-1].add(name)
         self.known.append(set())
         body = self.block()
@@ -913,6 +1011,14 @@ class Parser:
         if any(s[0] == "class" for s in body):
             raise MuError(f"line {line}: a class holds no class")
         return ("class", name, base, body)
+
+    def dotted(self):
+        """A dotted name: `nn.Module`."""
+        name = self.expect_kind("NAME")
+        while self.at("."):
+            self.next()
+            name += "." + self.expect_kind("NAME")
+        return name
 
     def memo_stmt(self):
         self.expect("memo")
@@ -992,9 +1098,19 @@ class Parser:
             self.expect(")")
             t = Py(f"tuple[{', '.join(parts)}]")
             t.parts = parts
+        elif self.peek()[0] == "STR":  # a class not defined yet: "GPT"
+            t = Py(self.next()[1])
         else:
-            name = self.expect_kind("NAME")
+            name = self.dotted()
             t = Py({"char": "str", "none": "None"}.get(name, name))
+            if self.at("["):  # a Python generic: Optional[str], Tensor[...]
+                self.next()
+                args = [self.type()]
+                while self.at(","):
+                    self.next()
+                    args.append(self.type())
+                self.expect("]")
+                t = Py(f"{t}[{', '.join(args)}]")
         if self.at("?"):
             self.next()
             self.need("from typing import Optional")
@@ -1072,13 +1188,28 @@ class Parser:
     # expressions, lowest precedence first
 
     def exprlist(self):
-        parts = [self.expr()]
+        parts = [self.starred()]
         while self.at(","):
             self.next()
-            parts.append(self.expr())
-        return parts[0] if len(parts) == 1 else ", ".join(parts)
+            if self.peek()[0] in ("NEWLINE", "EOF") or self.peek()[1] in ("=", ")"):
+                parts[-1] += ","  # a trailing comma: `x = 1,` is a tuple
+                break
+            parts.append(self.starred())
+        return parts[0] if len(parts) == 1 else Py(", ".join(parts))
+
+    def starred(self):
+        """An item of a comma list, which may unpack: `a, *rest = xs`."""
+        if self.at("*"):
+            self.next()
+            return Py(f"*{self.expr()}")
+        return self.expr()
 
     def expr(self):
+        if self.peek()[0] == "NAME" and self.at(":=", 1):
+            name = self.next()[1]
+            self.next()
+            self.known[-1].add(name)
+            return Py(f"{name} := {self.expr()}")
         e = self.or_()
         if self.at("?"):
             return self.ternary(e)
@@ -1098,9 +1229,10 @@ class Parser:
         `c ? a : d ? b : e` is a when c, else b when d, else e. A conditional
         in the `a` branch is bracketed so Python reads it as the branch."""
         self.expect("?")
-        a = self.expr()
+        a = self.arg() if self.lambda_ahead() else self.expr()
         self.expect(":")
-        b = self.expr()
+        b = self.arg() if self.lambda_ahead() else self.expr()
+        a = Py(f"({a})") if a.startswith("lambda") else a
         out = Py(f"{f'({a})' if a.cond else a} if {cond} else {b}")
         out.cond = True
         return out
@@ -1199,7 +1331,7 @@ class Parser:
 
     def term(self):
         e = self.unary()
-        while self.peek()[1] in ("*", "/", "//", "%") and self.peek()[0] == "OP":
+        while self.peek()[1] in ("*", "/", "//", "%", "@") and self.peek()[0] == "OP":
             op = self.next()[1]
             rhs = self.unary()
             a = e
@@ -1237,8 +1369,11 @@ class Parser:
         A `for` after the argument makes it a generator: `set f y for y in
         xs` is set(f(y) for y in xs). The innermost call `f y` is the
         generator's element, so it leaves the `for` to the call around it."""
-        named = self.peek()[0] == "NAME"
+        kind = self.peek()[0]
         e = self.postfix_chain()
+        # a name, or a method of a string: `", ".join parts`
+        method = self.toks[self.i - 1][0] == "NAME" and self.toks[self.i - 2][1] == "."
+        named = kind == "NAME" or kind == "STR" and method
         if named and self.operand_next():
             arg = self.postfix(nested=True)
             if self.at("for") and (arg.call or not nested):
@@ -1268,18 +1403,29 @@ class Parser:
                 return e
 
     def subscript(self):
-        """An index `i`, `i, j`, or a slice `lo:hi:step` with parts optional."""
+        """An index `i`, a slice `lo:hi:step` with parts optional, or several
+        of them apart by commas: `x[:, -1]`, `x[..., :3]`."""
+        items = [self.slice_item()]
+        while self.at(","):
+            self.next()
+            if self.at("]"):
+                items[-1] += ","
+                break
+            items.append(self.slice_item())
+        return ", ".join(items)
+
+    def slice_item(self):
         parts, cur = [], None
         while True:
             if self.at(":"):
                 self.next()
                 parts.append(cur or "")
                 cur = None
-            elif self.at("]"):
+            elif self.at("]") or self.at(","):
                 parts.append(cur or "")
                 break
             else:
-                cur = self.exprlist()
+                cur = self.starred()
         return ":".join(parts)
 
     def primary(self):
@@ -1290,9 +1436,18 @@ class Parser:
             at = (t[2], val.col)
             if name in set().union(*self.known) and at not in self.strings:
                 raise Reprime(at)
-        if kind in ("NUM", "STR"):
+        if kind == "STR":
+            # adjacent strings are one, as in Python: "a" "b"
+            parts = [self.next()[1]]
+            while self.peek()[0] == "STR":
+                parts.append(self.next()[1])
+            return Py(" ".join(parts))
+        if kind == "NUM":
             self.next()
             return Py(val)
+        if val == "..." and kind == "OP":
+            self.next()
+            return Py("...")
         if kind == "NAME" and self.peek(1)[0] == "PRIME":
             # `min_price'`: the new value of a bound name, on a value side
             self.next()
@@ -1365,9 +1520,9 @@ class Parser:
         return Py(open_ + ", ".join(items) + close)
 
     def item(self, open_):
-        if self.at("*"):
-            self.next()
-            return Py(f"*{self.expr()}")
+        if self.at("*") or (open_ == "{" and self.at("**")):
+            star = self.next()[1]
+            return Py(f"{star}{self.expr()}")
         e = self.expr()
         if open_ == "{" and self.at(":"):
             self.next()
@@ -1429,6 +1584,9 @@ class Parser:
         while not self.at(")"):
             if self.peek()[1] in ("+", "*") and self.peek(1)[1] in (",", ")"):
                 args.append(Py(self.next()[1]))
+            elif self.at("**"):
+                self.next()  # kept among the named arguments, in its place
+                kwargs.append((f"**{len(kwargs)}", self.expr()))
             elif self.at("*"):
                 self.next()
                 args.append(Py(f"*{self.expr()}"))
@@ -1537,7 +1695,9 @@ class Parser:
             self.need(f"from math import {fn}")
         if fn in HELPERS:
             self.need(helper=fn)
-        parts = list(args) + [f"{k}={v}" for k, v in kw.items()]
+        parts = list(args) + [
+            f"**{v}" if k.startswith("**") else f"{k}={v}" for k, v in kw.items()
+        ]
         return Py(f"{fn}({', '.join(parts)})")
 
     def fold(self, allow_block=False):
@@ -1728,7 +1888,7 @@ def assigned(stmts):
     """Plain names a block assigns with = or op=, not inside nested defs."""
     out = set()
     for s in stmts:
-        if s[0] == "assign":
+        if s[0] in ("assign", "annassign"):
             out |= targets(s[1])
         for body in children(s):
             out |= assigned(body)
@@ -1740,8 +1900,10 @@ def bound(stmts, params=False):
     params, the parameters of every def too."""
     out = set()
     for s in stmts:
-        if s[0] == "assign":
+        if s[0] in ("assign", "annassign"):
             out |= targets(s[1])
+        elif s[0] == "with":
+            out |= {n for m in re.findall(r" as ([^,]+)", s[1]) for n in NAME.findall(m)}
         elif s[0] in ("def", "memo", "class"):
             out.add(s[1])
             if params and s[0] != "class":
@@ -1783,6 +1945,11 @@ def children(s):
         return [b for _, b in s[1]] + ([s[2]] if s[2] else [])
     if s[0] == "foldblock":
         return [s[6]]
+    if s[0] == "with":
+        return [s[2]]
+    if s[0] == "try":
+        _, body, handlers, other, final = s
+        return [body] + [b for _, b in handlers] + [b for b in (other, final) if b]
     return []
 
 
@@ -1844,6 +2011,18 @@ class Emitter:
                 self.out(ind, f"{'if' if k == 0 else 'elif'} {cond}:")
                 self.block(body, ind + 1, returns=last)
             self.loop_else(other, ind, returns=last)
+        elif kind == "with":
+            self.out(ind, f"with {s[1]}:")
+            self.block(s[2], ind + 1, returns=last)
+        elif kind == "try":
+            self.try_(s, ind, last)
+        elif kind == "raise":
+            self.out(ind, "raise" if s[1] is None else f"raise {s[1]}")
+        elif kind in ("global", "nonlocal"):
+            self.out(ind, f"{kind} {s[1]}")
+        elif kind == "annassign":
+            _, lhs, t, val = s
+            self.out(ind, f"{lhs}: {t}" + ("" if val is None else f" = {val}"))
         elif kind == "assign":
             self.out(ind, f"{s[1]} {s[2]} {s[3]}")
             if getattr(s[1], "convert", None):
@@ -1880,6 +2059,22 @@ class Emitter:
         elif kind == "foldblock":
             self.foldblock(s, ind, last)
 
+    def try_(self, s, ind, last):
+        """A try returns the last line of its handlers and its else; of its
+        body too when there is no else, which would run after it."""
+        _, body, handlers, other, final = s
+        self.out(ind, "try:")
+        self.block(body, ind + 1, returns=False if other else last)
+        for head, b in handlers:
+            self.src_line = self.at_line.get(id(b), self.src_line)
+            self.out(ind, f"except {head}:" if head else "except:")
+            self.block(b, ind + 1, returns=last)
+        self.loop_else(other, ind, returns=last)
+        if final:
+            self.src_line = self.at_line.get(id(final), self.src_line)
+            self.out(ind, "finally:")
+            self.block(final, ind + 1)
+
     def loop_else(self, other, ind, returns=False):
         if other:
             self.src_line = self.at_line.get(id(other), self.src_line)
@@ -1913,7 +2108,10 @@ class Emitter:
         _, name, params, ret, body = s[:5]
         top = not self.scopes  # a method, or a top-level function
         names = {p for p, _ in params}
-        sig = ["self"] * (self.method and top)
+        marks = {d for _, d in getattr(s, "decorators", ())}
+        first = "cls" if "classmethod" in marks else "self"
+        # a staticmethod takes no object, a classmethod takes the class
+        sig = [first] * (self.method and top and "staticmethod" not in marks)
         sig += [param(p, t) for p, t in params]
         arrow = f" -> {ret}" if ret else ""
         self.decorators(s, ind)
@@ -1940,7 +2138,8 @@ class Emitter:
         res = ret_name(body)
         self.rets.append(res)
         # a def typed `-> none`, and __init__, return nothing on their own
-        returns = False if res or ret == "None" or name == "__init__" else "return {}"
+        quiet = res or ret == "None" or name == "__init__" or yields(body)
+        returns = False if quiet else "return {}"
         if top and any(is_memo(b) for b in body):
             # memo recursion can run 10^4+ deep: evaluate on a big stack
             self.out(ind + 1, "def run():")
@@ -1997,7 +2196,8 @@ class Emitter:
 def param(p, t):
     """One parameter of a def's signature: `xs`, `xs: list[int]`, `by=None`,
     `reverse: bool = False`."""
-    head = p if t is None else f"{p}: {t}"
+    head = getattr(p, "star", "") + p
+    head = head if t is None else f"{head}: {t}"
     d = getattr(p, "default", None)
     if d is None:
         return head
@@ -2045,7 +2245,7 @@ def transpile(src, mapped=False):
         if k:
             e.out(0, "\n")
         e.stmt(d, 0, False)
-    parts = []
+    parts = [p.docstring] if p.docstring else []
     if p.imports:
         parts.append("\n".join(sorted(p.imports)))
     if p.memo_used:
@@ -2056,7 +2256,12 @@ def transpile(src, mapped=False):
     origins.append(spread(e))
     if p.script:
         script = Emitter(at_line=p.at_line)
-        script.block(p.script, 0)
+        for k, st in enumerate(p.script):
+            # a def or class among the script's lines is set apart, as above
+            kinds = {st[0], p.script[k - 1][0]} if k else set()
+            if kinds & {"def", "class"}:
+                script.out(0, "\n")
+            script.stmt(st, 0, False)
         parts.append("\n".join(script.lines))
         origins.append(spread(script))
     code = "\n\n\n".join(parts) + "\n"
@@ -2122,6 +2327,7 @@ def compile_stmts(src, last="_ = {}"):
 STATEMENT_WORDS = {
     "def", "memo", "for", "in", "if", "elif", "else", "while", "return", "and",
     "or", "not", "from", "first", "break", "continue", "yield", "class", "extends",
+    "with", "as", "try", "except", "finally", "raise", "global", "nonlocal",
 }  # fmt: skip
 TIGHT = {"..", "..<", "."}
 
@@ -2139,9 +2345,11 @@ def gap(prev, cur, unary, subscript, paren=False):
         return "  " if ck == "COMMENT" else " "
     if "TERN" in (pk, ck):
         return " "
+    if subscript and (pk, pv) == ("OP", ",") and cv == ":":
+        return " "  # x[:, :3]
     if ck == "OP" and cv in (",", ":", ")", "]", "}", "?"):
         return ""
-    if pk == "OP" and pv in "([{@":
+    if pk == "DECO" or pk == "OP" and pv in "([{":
         return ""
     if pk == "POP":
         return " "  # a pop inside a comprehension: `[h . for _ in xs]`
@@ -2196,9 +2404,25 @@ def mark_ternaries(toks):
     return out
 
 
-def render(toks):
+def render(toks, level=0):
+    """One logical line. An NL token is a line break the author made inside
+    brackets: it is kept, and the next line is indented one step for each
+    earlier line that left a bracket open, `f(g(` counting once. A line
+    that starts by closing brackets sits with the line that opened them."""
     out, prev, unary, stack = [], None, False, []
+    opened, row = [], 0  # the row each open bracket was opened on
+    if toks and toks[0] == ("OP", "@"):
+        toks = [("DECO", "@")] + list(toks[1:])  # a decorator, not a matmul
     for t in pop_dots(mark_ternaries(toks)):
+        if t[0] == "NL":
+            out.append("\n")
+            prev, unary, row = None, False, row + 1
+            continue
+        if prev is None and out:  # the first token after a kept line break
+            rows = set(opened)
+            if t[0] == "OP" and t[1] in ")]}" and opened:
+                rows.discard(opened[-1])
+            out.append("  " * (level + len(rows)))
         pk, pv = prev or ("OP", "(")
         if prev is not None:
             sub = bool(stack) and stack[-1] is True
@@ -2209,8 +2433,10 @@ def render(toks):
             after_value = after_value or pk == "OP" and pv in ")]}"
             sub = t[1] == "[" and prev is not None and after_value
             stack.append(True if sub else t[1])
+            opened.append(row)
         elif t[0] == "OP" and t[1] in ")]}" and stack:
             stack.pop()
+            opened.pop()
         opens = prev is None or pk == "OP" and pv not in ")]}" or pv in STATEMENT_WORDS
         opens = opens or pk == "TERN"
         unary = t[0] == "OP" and (
@@ -2218,8 +2444,8 @@ def render(toks):
             and opens
             or t[1] in ("<", ">")
             and pv == "for"  # the loop mark: for >i, x in xs
-            or t[1] == "*"
-            and (prev is None or pv in "([{,")
+            or t[1] in ("*", "**")
+            and (prev is None or pv in "([{," or (pk, pv) == ("NAME", "return"))
             or t[1] == ":"
             and (pk, pv) == ("OP", "{")  # {:list} keeps the default tight
         )
@@ -2228,7 +2454,7 @@ def render(toks):
     return "".join(out)
 
 
-BLOCK_WORDS = {"if", "elif", "else", "for", "while"}
+BLOCK_WORDS = {"if", "elif", "else", "for", "while", "with", "try", "except", "finally"}
 
 
 def split_inline(toks):
@@ -2286,16 +2512,59 @@ def align_cases(lines):
     return lines
 
 
+ONE_LINE_DEF = re.compile(r"def \w+\(.*\)(?: -> [^:]+)?: \S")
+
+
 def set_apart(prev, level, body, in_class):
     """Whether a blank line goes above this line: a top-level def or class,
     its decorators and its comments, and a method of a class are set apart,
     except right under a block header or under a comment or decorator."""
     if prev is None:
         return False
+    if ONE_LINE_DEF.match(body) and ONE_LINE_DEF.match(prev[1]) and prev[0] == level:
+        return False  # one-line defs in a row stay together
     top = body.startswith(("def ", "memo ", "class ", "#", "@")) and (
         level == 0 or level == 1 and in_class
     )
     return top and not prev[1].startswith(("#", "@")) and prev[0] >= level
+
+
+WIDTH = 88  # a bracketed expression joined onto one line must fit in this
+
+
+def without_trailing_commas(toks):
+    """A comma right before a closing bracket goes, unless it makes a
+    one-element tuple, `(x,)`: a paren that is not a call's and holds no
+    other comma of its own."""
+    drop, stack = set(), []  # stack: [open index, commas inside, is a tuple]
+    for k, (kind, val) in enumerate(toks):
+        if kind != "OP":
+            continue
+        if val in "([{":
+            prev = toks[k - 1] if k else ("OP", "(")
+            call = prev[0] in ("NAME", "STR") or prev[1] in (")", "]")
+            stack.append([k, 0, val == "(" and not call])
+        elif val == "," and stack:
+            stack[-1][1] += 1
+        elif val in ")]}" and stack:
+            _, commas, tuple_ = stack.pop()
+            if toks[k - 1] == ("OP", ",") and not (tuple_ and commas == 1):
+                drop.add(k - 1)
+    return [t for k, t in enumerate(toks) if k not in drop]
+
+
+def kept_breaks(toks, level):
+    """The line breaks an author made inside brackets go when the line,
+    joined, fits in WIDTH and holds no comment that would swallow the code
+    after it. Otherwise they stay."""
+    if not any(t[0] == "NL" for t in toks):
+        return toks
+    joined = [t for t in toks if t[0] != "NL"]
+    joined = without_trailing_commas(joined)
+    inside = any(t[0] == "COMMENT" for t in joined[:-1])
+    if not inside and 2 * level + len(render(joined)) <= WIDTH:
+        return joined
+    return toks
 
 
 def fmt(src):
@@ -2304,7 +2573,9 @@ def fmt(src):
     blank line between top-level defs and classes and between the methods
     of a class, and every one-line body (`if c: x`) moved onto its own
     indented line. A bracketed expression split over several lines is
-    joined into one. fmt(fmt(s)) == fmt(s)."""
+    joined into one when it fits in WIDTH and holds no comment; otherwise
+    its line breaks stay, each line indented one step per open bracket.
+    fmt(fmt(s)) == fmt(s)."""
     lines, indents, buf, depth, blank, level = [], [0], [], 0, False, 0
     in_class = False  # the current top-level block is a class
     rows, k = src.splitlines(), -1
@@ -2351,11 +2622,13 @@ def fmt(src):
             if m.lastgroup == "op":
                 depth += (val in "([{") - (val in ")]}")
             buf.append((m.lastgroup.upper(), val))
+        if depth and buf and buf[-1][0] != "NL":
+            buf.append(("NL", ""))  # a line break inside brackets is kept
         if depth == 0 and buf:
             at = level
             while buf:  # `if c: stmt` becomes a header and an indented body
                 head, buf = split_inline(buf)
-                lines.append((at, render(head)))
+                lines.append((at, render(kept_breaks(head, at), at)))
                 at += 1
     if depth:
         raise MuError("unclosed bracket at end of file")
