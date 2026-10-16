@@ -25,6 +25,9 @@ nav:
       - "0.1": spec/v0.1.md
   - Editor extension: vscode/README.md
 
+extra_css:
+  - stylesheets/extra.css
+
 theme:
   name: material
   features:

@@ -1,0 +1,4 @@
+/* wider pages, so the longest solve line fits in its code block */
+.md-grid {
+  max-width: 76rem;
+}
