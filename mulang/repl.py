@@ -20,7 +20,7 @@ import threading
 from collections import Counter
 from pathlib import Path
 
-from . import HELPERS, TOKEN, MuError, compile_stmts, profile, tokenize
+from . import TOKEN, MuError, compile_stmts, helper_of, profile, tokenize
 
 OUT = "__mu_out__"
 # same rule as the VS Code extension: these lines open a block
@@ -277,7 +277,7 @@ class Repl:
             exec(imp, self.ns)
         for h in helpers:
             if h not in self.loaded:
-                exec(HELPERS[h].source, self.ns)
+                exec(helper_of(h).source, self.ns)
                 self.loaded.add(h)
         self.ns.pop(OUT, None)
         try:

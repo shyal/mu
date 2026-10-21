@@ -238,7 +238,7 @@ class MuIde {
       this.start(root);
     }
     const id = ++this.seq;
-    const req = { id, cmd, root, text: document.getText(), line: position.line, col: position.character };
+    const req = { id, cmd, root, path: document.uri.fsPath, text: document.getText(), line: position.line, col: position.character };
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) resolve(null);

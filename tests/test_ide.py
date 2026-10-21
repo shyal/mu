@@ -80,7 +80,8 @@ def test_definition_of_a_name_is_its_mu_line():
 
 def test_definition_of_a_helper_is_its_source():
     [d] = ide.definition(req("definition", 8, 10))
-    assert d["path"] == pydsa.grid.__file__
+    # a module written in mu (pydsa sets __mu__) opens at its .mu source
+    assert d["path"] == getattr(pydsa.grid, "__mu__", pydsa.grid.__file__)
     assert "def nbrs(" in open(d["path"]).read().split("\n")[d["line"]]
 
 
@@ -163,3 +164,19 @@ def test_primes_colours_a_bound_f_read_as_a_prime():
     ]
     # f is the def's name, but f'{a}' reads only as a string
     assert ide.primes({"text": "def f(a: str) -> str\n  f'{a}'\n"}) == []
+
+
+def test_definition_of_a_name_from_a_mu_module(tmp_path):
+    """Go-to-definition on a name imported from a mu module opens the .mu
+    at its def."""
+    from mulang import ide
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "nums.mu").write_text("X = 1\n\ndef evens(xs: [int]) -> [int]\n  xs\n")
+    main = tmp_path / "main.mu"
+    text = "from lib.nums import evens\n\nprint evens([1, 2])\n"
+    main.write_text(text)
+    req = {"root": str(tmp_path), "path": str(main), "text": text, "line": 2, "col": 7}
+    assert ide.definition(req) == [
+        {"path": str((tmp_path / "lib" / "nums.mu").resolve()), "line": 2, "col": 0}
+    ]

@@ -394,6 +394,10 @@ def library(module, *names):
     global REVISION
     path = inspect.getsourcefile(module)
     tree = ast.parse(inspect.getsource(module))
+    # a module written in mu (pydsa imports one through mu, and sets
+    # __mu__): go-to-definition opens the .mu, at the line of the def
+    written = Path(getattr(module, "__mu__", None) or Path(path).with_suffix(".mu"))
+    lines = written.read_text().split("\n") if written.is_file() else None
     top = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -437,11 +441,131 @@ def library(module, *names):
         doc = ""
         if not isinstance(node, constants):
             doc = (ast.get_docstring(node) or "").split("\n", 1)[0].strip()
-        HELPERS[name] = Helper(imps, deps, source, doc, path, node.lineno - 1)
+        at = (path, node.lineno - 1)
+        if lines is not None:
+            head = re.compile(rf"^(?:async )?(?:def|class) {name}\b|^{name} =")
+            line = next((k for k, ln in enumerate(lines) if head.match(ln)), None)
+            if line is not None:
+                at = (str(written), line)
+        HELPERS[name] = Helper(imps, deps, source, doc, *at)
         done.append(name)
         todo += [d for d in deps if d not in HELPERS]
     REVISION += 1
     return done
+
+
+# mu modules: `from m import a, b` where m.mu is found reads the defs from
+# that file, transpiled, and pastes the ones the file calls, as a library
+# helper is pasted. A file's own directory is searched first, then the
+# working directory, then $MUPATH, then the directories in MU_PATH.
+MU_PATH = []  # directories a profile adds with mu_path
+NATIVE = {}  # "<path>:<name>" -> Helper, every def of every mu module read
+_MODULES = {}  # path -> (mtime, {name: key}), the names each module defines
+_LOADING = []  # the modules being read, to refuse an import cycle
+_HERE = []  # the directory of each file being transpiled, innermost last
+
+
+def mu_path(*dirs):
+    """Add directories to search for mu modules."""
+    global REVISION
+    for d in dirs:
+        if str(d) not in MU_PATH:
+            MU_PATH.append(str(d))
+    REVISION += 1
+
+
+def helper_of(key):
+    """The Helper for a name in HELPERS or a key in NATIVE."""
+    return HELPERS[key] if key in HELPERS else NATIVE[key]
+
+
+def find_module(name, here=None):
+    """The path of the mu module `name` (a.b is a/b.mu), or None. here is
+    the importing file's directory; the innermost transpile's by default."""
+    rel = Path(*name.split(".")).with_suffix(".mu")
+    dirs = ([here] if here else _HERE[-1:]) + [os.getcwd()]
+    dirs += [d for d in os.environ.get("MUPATH", "").split(os.pathsep) if d]
+    for d in dirs + MU_PATH:
+        if (Path(d) / rel).is_file():
+            return (Path(d) / rel).resolve()
+    return None
+
+
+def load_module(path):
+    """{name: key in NATIVE} for the defs, classes and constants a mu module
+    defines; its script (tests under the defs) is not part of it. Read again
+    when the file changes."""
+    path = Path(path).resolve()
+    mtime = path.stat().st_mtime
+    if path in _MODULES and _MODULES[path][0] == mtime:
+        return _MODULES[path][1]
+    if path in _LOADING:
+        chain = " -> ".join(p.name for p in _LOADING[_LOADING.index(path) :])
+        raise MuError(f"an import cycle: {chain} -> {path.name}")
+    _LOADING.append(path)
+    try:
+        src = path.read_text()
+        code, origin = transpile(src, mapped=True, path=path)
+        script = parsed(src, Parser.program)[0].script_line
+    except MuError as err:
+        raise MuError(f"{path.name}: {err}") from None
+    finally:
+        _LOADING.pop()
+    tree = ast.parse(code)
+    top = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            top[node.name] = node
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            if isinstance(target, ast.Name) and getattr(node, "value", None):
+                top[target.id] = node
+    imports = _imports(tree)
+    exported = {}
+    for name, node in top.items():
+        line = origin[node.lineno - 1]
+        if line is not None and script is not None and line >= script:
+            continue  # a script line, not part of the module
+        source = stripped(node)
+        free = {n.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Name)}
+        free.discard(name)
+        deps = tuple(f"{path}:{n}" for n in sorted(free) if n in top)
+        imps = tuple(sorted(imports[n] for n in free if n in imports))
+        doc = ""
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            doc = (ast.get_docstring(node) or "").split("\n", 1)[0].strip()
+        at = (str(path), line - 1) if line is not None else (None, None)
+        NATIVE[f"{path}:{name}"] = Helper(imps, deps, source, doc, *at)
+        if line is not None:
+            exported[name] = f"{path}:{name}"
+    _MODULES[path] = (mtime, exported)
+    return exported
+
+
+def native_import(line, at):
+    """{name: key} for an import line that names a mu module, else None."""
+    if line.startswith("import "):
+        for name in line[7:].split(","):
+            if find_module(name.split(" as ")[0].strip()):
+                raise MuError(
+                    f"line {at}: {name.strip()} is a mu module; write `from {name.strip()} import` and the names"
+                )
+        return None
+    module, names = line[5:].split(" import ", 1)
+    if module.startswith("."):
+        return None  # relative: an import inside a Python package
+    path = find_module(module.strip())
+    if path is None:
+        return None
+    defined = load_module(path)
+    out = {}
+    for name in (n.strip() for n in names.strip("() ").split(",")):
+        if name == "*" or " as " in name:
+            raise MuError(f"line {at}: a mu import names each def, with no `*` or `as`")
+        if name not in defined:
+            raise MuError(f"line {at}: {path.name} defines no {name}")
+        out[name] = defined[name]
+    return out
 
 
 def environment(objects):
@@ -557,6 +681,8 @@ class Parser:
         self.bare = set()  # helper names used without a call: sort(ds, by=even)
         self.imports = set()
         self.helpers = []
+        self.native = {}  # name -> NATIVE key, the names imported from mu modules
+        self.imported = set()  # the names Python imports bind
         self.memo_used = False
         self.folds = []  # (op, from, if, block) for each fold, for folds() in asserts
         self.known = [set()]  # names bound so far: the file's, then each open def's
@@ -592,10 +718,10 @@ class Parser:
         return t[1]
 
     def need(self, imp=None, helper=None):
-        if imp:
+        if imp and not imported(imp) <= self.imported:  # the file imports it already
             self.imports.add(imp)
         if helper and helper not in self.helpers:
-            h = HELPERS[helper]
+            h = helper_of(helper)
             for d in h.deps:
                 self.need(helper=d)
             self.imports.update(h.imports)
@@ -617,7 +743,9 @@ class Parser:
         while self.peek()[0] != "EOF":
             t = self.peek()
             if self.script_line is None and (self.at("import") or self.at("from")):
-                self.imports.add(self.import_line())
+                line = self.import_line()
+                if line is not None:
+                    self.imports.add(line)
             elif self.script_line is None and self.top_ahead():
                 tops.append(self.stmt())
             else:
@@ -644,14 +772,26 @@ class Parser:
         return self.toks[j][:2] in (("NAME", "def"), ("NAME", "class"))
 
     def import_line(self):
-        """`import a.b` or `from a.b import c, d`, passed through to Python."""
+        """`import a.b` or `from a.b import c, d`, passed through to Python;
+        None for an import from a mu module, whose defs are pasted."""
+        at = self.peek()[2]
         words = []
         while self.peek()[0] != "NEWLINE":
             words.append(self.next()[1])
         self.next()
-        line = " ".join(words).replace(" . ", ".").replace(" ,", ",")
+        if words[0] == "from":
+            k = words.index("import")
+            names = " ".join(words[k + 1 :]).replace(" ,", ",")
+            line = f"from {''.join(words[1:k])} import {names}"
+        else:
+            line = "import " + re.sub(r" ?\. ?", ".", " ".join(words[1:])).replace(" ,", ",")
         self.known[0] |= imported(line)
-        return line
+        names = native_import(line, at)
+        if names is None:
+            self.imported |= imported(line)  # bound by Python: never a helper
+            return line
+        self.native.update(names)
+        return None
 
     def statements(self):
         """Any statements, for the REPL."""
@@ -1077,6 +1217,9 @@ class Parser:
         """[T] list, {K: V} dict, {T} set, (A, B) tuple, T? optional,
         A -> B or (A, B) -> C function; any other name passes through."""
         t = self.base_type()
+        while self.at("|"):  # int | str, Python's union
+            self.next()
+            t = Py(f"{t} | {self.base_type()}")
         if self.at("->") and not self.at("NEWLINE", 1):
             self.next()
             self.need("from typing import Callable")
@@ -1115,10 +1258,11 @@ class Parser:
             t = Py({"char": "str", "none": "None"}.get(name, name))
             if self.at("["):  # a Python generic: Optional[str], Tensor[...]
                 self.next()
-                args = [self.type()]
+                # Callable[[A, B], C]: its first argument is a list of types
+                args = [self.generic_arg(name.split(".")[-1] == "Callable")]
                 while self.at(","):
                     self.next()
-                    args.append(self.type())
+                    args.append(self.generic_arg())
                 self.expect("]")
                 t = Py(f"{t}[{', '.join(args)}]")
         if self.at("?"):
@@ -1126,6 +1270,23 @@ class Parser:
             self.need("from typing import Optional")
             t = Py(f"Optional[{t}]")
         return t
+
+    def generic_arg(self, types=False):
+        """An argument of a Python generic: a type, or `...` as in
+        Tuple[int, ...]. With types, `[A, B]` is a list of types, the
+        parameters of Callable[[A, B], C]; elsewhere `[A]` is mu's list."""
+        if self.at("..."):
+            self.next()
+            return Py("...")
+        if types and self.at("["):
+            self.next()
+            args = [] if self.at("]") else [self.type()]
+            while self.at(","):
+                self.next()
+                args.append(self.type())
+            self.expect("]")
+            return Py(f"[{', '.join(args)}]")
+        return self.type()
 
     def repeat(self):
         """`for xs` with no `in`: the iterable of a loop that names no
@@ -1477,7 +1638,7 @@ class Parser:
             self.next()
             if val == "inf":
                 self.need("from math import inf")
-            if val in HELPERS:
+            if (val in HELPERS and val not in self.imported) or val in self.native:
                 self.bare.add(val)
             return Py(CONSTANTS.get(val, val))
         if val == "(":
@@ -1485,7 +1646,7 @@ class Parser:
             if self.at(")"):
                 self.next()
                 return Py("()")
-            parts = [self.pushed(self.expr())]
+            parts = [self.pushed(self.item("("))]  # (*e, 1): a starred item
             if self.at("for"):  # a generator: (e for x in xs)
                 gen = self.comprehension()
                 self.expect(")")
@@ -1496,7 +1657,7 @@ class Parser:
                 if self.at(")"):
                     one = len(parts) == 1
                     break
-                parts.append(self.expr())
+                parts.append(self.item("("))
             self.expect(")")
             return Py(f"({', '.join(parts)}{',' if one else ''})")
         if val == "[":
@@ -1706,7 +1867,9 @@ class Parser:
             fn = "Counter"
         if fn in ("ceil", "floor"):
             self.need(f"from math import {fn}")
-        if fn in HELPERS:
+        if fn in self.native:
+            self.need(helper=self.native[fn])
+        elif fn in HELPERS and fn not in self.imported:
             self.need(helper=fn)
         parts = list(args) + [
             f"**{v}" if k.startswith("**") else f"{k}={v}" for k, v in kw.items()
@@ -1970,6 +2133,20 @@ def children(s):
     return []
 
 
+DOC = re.compile(r'^[rRuU]?("""|\'\'\')')  # a triple-quoted string
+
+
+def docstring(text, ind):
+    """A multi-line string that stands as a statement, a docstring, with its
+    lines after the first moved from mu's indent to the Python one."""
+    first, *rest = text.split("\n")
+    margin = min(
+        (len(ln) - len(ln.lstrip(" ")) for ln in rest if ln.strip()), default=0
+    )
+    pad = "    " * ind
+    return "\n".join([first] + [pad + ln[margin:] if ln.strip() else "" for ln in rest])
+
+
 class Emitter:
     """Writes Python. A block's last value goes through the format string
     `last`: "return {}" in a def, something else at the REPL's top level.
@@ -2050,7 +2227,7 @@ class Emitter:
         elif kind in ("break", "continue", "pass"):
             self.out(ind, kind)
         elif kind in ("import", "push"):
-            self.out(ind, s[1])
+            self.out(ind, "pass" if s[1] is None else s[1])  # None: a mu import
         elif kind == "yield":
             self.out(ind, "yield" if s[1] is None else f"yield {s[1]}")
         elif kind == "del":
@@ -2069,7 +2246,10 @@ class Emitter:
             else:
                 self.out(ind, f"assert {s[1]}")
         elif kind == "expr":
-            self.out(ind, last.format(s[1]) if last else s[1])
+            if not last and DOC.match(s[1]) and "\n" in s[1]:
+                self.out(ind, docstring(s[1], ind))
+            else:
+                self.out(ind, last.format(s[1]) if last else s[1])
         elif kind == "tail" and last:
             # the value of `int(a) = x`, wanted only as a block's last line
             self.out(ind, last.format(s[1]))
@@ -2244,16 +2424,32 @@ def spread(e):
     return out
 
 
-def transpile(src, mapped=False):
+def transpile(src, mapped=False, path=None, library=True):
     """The Python for a mu file. With mapped, also a list with one entry per
-    output line: the mu line it comes from, or None for a pasted helper."""
+    output line: the mu line it comes from, or None for a pasted helper.
+    path is the file's own, where its mu imports are looked for first.
+    With library=False, no profile helper is pasted, only the language's
+    own: the Python of a library module is the same in every process."""
+    global HELPERS
+    _HERE.append(str(Path(path).resolve().parent) if path else os.getcwd())
+    kept = HELPERS
+    if not library:
+        HELPERS = dict(RUNTIME)
+    try:
+        return _transpile(src, mapped)
+    finally:
+        HELPERS = kept
+        _HERE.pop()
+
+
+def _transpile(src, mapped):
     p, tops = parsed(src, Parser.program)
     if any(t and t.startswith("list[list[") for d in grid_defs(tops) for _, t in d[2]):
         p.need(helper="Grid")
     # a helper passed by name, `sort(ds, by=even)`, is pasted like one called,
     # unless the file binds that name itself
     for name in sorted(p.bare - bound_anywhere(p.globals + tops + p.script)):
-        p.need(helper=name)
+        p.need(helper=p.native.get(name, name))
     e = Emitter(at_line=p.at_line)
     for g in p.globals:
         e.stmt(g, 0, False)
@@ -2268,10 +2464,12 @@ def transpile(src, mapped=False):
         parts.append("\n".join(sorted(p.imports)))
     if p.memo_used:
         parts.append("sys.setrecursionlimit(1 << 20)")
-    parts += [HELPERS[h].source for h in p.helpers]
-    parts.append("\n".join(e.lines))
-    origins = [[None] * (part.count("\n") + 1) for part in parts[:-1]]
-    origins.append(spread(e))
+    # two mu modules may paste the same library helper: once is enough
+    parts += list(dict.fromkeys(helper_of(h).source for h in p.helpers))
+    origins = [[None] * (part.count("\n") + 1) for part in parts]
+    if e.lines or not p.script:  # a file of only a script has no defs part
+        parts.append("\n".join(e.lines))
+        origins.append(spread(e) or [None])
     if p.script:
         script = Emitter(at_line=p.at_line)
         for k, st in enumerate(p.script):
@@ -2333,6 +2531,8 @@ def compile_stmts(src, last="_ = {}"):
     """Top-level statements to Python, for the REPL: (imports, helpers, code).
     The value of a final expression goes through `last`."""
     p, stmts = parsed(src, Parser.statements)
+    for key in p.native.values():  # the REPL defines what it imports at once
+        p.need(helper=key)
     if any(t and t.startswith("list[list[") for d in grid_defs(stmts) for _, t in d[2]):
         p.need(helper="Grid")
     e = Emitter()

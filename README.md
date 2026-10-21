@@ -11,7 +11,8 @@ in the source of every helper the file calls.
 
 ```
 pip install mu-language
-mu file.mu        # the Python
+mu file.mu        # run the file
+mu --py file.mu   # the Python
 mu --fmt file.mu  # the file, formatted
 mu-repl           # a REPL
 ```
@@ -23,7 +24,7 @@ complete mu files. The mu + pydsa version calls
 [pydsa](https://www.shyal.com/pydsa/) helpers by name, with no import. The
 profile in [Profiles](#profiles) registers them. The python tab gives the
 same solve in plain Python, for comparison. In both mu versions, the
-Python that `mu file.mu` prints
+Python that `mu --py file.mu` prints
 imports only the standard library, because mu pastes in the source of each
 helper that the file calls.
 

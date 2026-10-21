@@ -1219,3 +1219,102 @@ def test_async_def_awaits():
     exec(out, {})
     out = transpile("class Solution\n  @staticmethod\n  async def f() -> int\n    1\n")
     assert "    @staticmethod\n    async def f() -> int:" in out
+
+
+def test_mu_file_runs_the_file(tmp_path):
+    """`mu FILE ARG...` runs the file with ARGs in sys.argv, and a traceback
+    shows the mu line, not the Python one; `mu --py FILE` prints the Python."""
+    import sys
+
+    f = tmp_path / "t.mu"
+    f.write_text(
+        "import sys\n\ndef f(n: int) -> int\n  n * 2\n\n"
+        "print(f(21), sys.argv[1:])\nx = [1]\nprint x[3]\n"
+    )
+    mu = [sys.executable, "-m", "mulang"]
+    run = subprocess.run([*mu, str(f), "a"], capture_output=True, text=True)
+    assert run.returncode == 1
+    assert run.stdout == "42 ['a']\n"
+    assert f'File "{f}", line 8, in <module>\n    print x[3]\n' in run.stderr
+    assert "mulang" not in run.stderr
+    py = subprocess.run([*mu, "--py", str(f)], capture_output=True, text=True)
+    assert "print(x[3])" in py.stdout
+    stdin = subprocess.run([*mu, "-"], input="xs = [1, 2]\nprint len xs\n", capture_output=True, text=True)
+    assert stdin.stdout == "2\n"
+
+
+def test_a_mu_module_is_imported_by_its_defs(tmp_path):
+    """`from lib.nums import evens` finds lib/nums.mu next to the file and
+    pastes the defs the file calls, with what they call and import; the
+    module's own tests under its defs are not part of it."""
+    import sys
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "nums.mu").write_text(
+        "from math import gcd\n\nLIMIT = 10\n\n"
+        "def even(n: int) -> bool\n  n % 2 == 0\n\n"
+        "def evens(xs: [int]) -> [int]\n  [x for x in xs if even(x)]\n\n"
+        "def lcm(a: int, b: int) -> int\n  a * b // gcd(a, b)\n\n"
+        "def big(n: int) -> bool\n  n >= LIMIT\n\n"
+        "assert evens([1, 2]) == [2]\nprint 'module tests ran'\n"
+    )
+    main = tmp_path / "main.mu"
+    main.write_text("from lib.nums import evens, big\n\nprint evens([1, 2, 3, 4])\nprint big(11)\n")
+    out = transpile(main.read_text(), path=main)
+    assert "from lib.nums" not in out and "def even(n):" in out and "LIMIT = 10" in out
+    assert "def lcm" not in out and "gcd" not in out and "module tests" not in out
+    run = subprocess.run(
+        [sys.executable, "-m", "mulang", str(main)], capture_output=True, text=True, cwd="/"
+    )
+    assert run.stdout == "[2, 4]\nTrue\n", run.stderr
+
+
+def test_a_mu_import_names_what_it_takes(tmp_path):
+    (tmp_path / "m.mu").write_text("def f() -> int\n  1\n")
+    (tmp_path / "a.mu").write_text("from b import g\n\ndef f() -> int\n  g()\n")
+    (tmp_path / "b.mu").write_text("from a import f\n\ndef g() -> int\n  f()\n")
+    here = tmp_path / "x.mu"
+    for src, said in [
+        ("from m import nope\n", "m.mu defines no nope"),
+        ("import m\n", "write `from m import`"),
+        ("from m import f as g\n", "no `*` or `as`"),
+        ("from a import f\n", "an import cycle: a.mu -> b.mu -> a.mu"),
+    ]:
+        with pytest.raises(MuError, match=re.escape(said)):
+            transpile(src, path=here)
+    # a Python module is imported as before
+    assert "from collections import deque" in transpile("from collections import deque\n", path=here)
+
+
+def test_a_union_type():
+    out = transpile("def f(x: int | str) -> int | none\n  none\n")
+    assert "def f(x: int | str) -> int | None:" in out
+
+
+def test_a_relative_import_stays_python_and_binds_its_names():
+    """`from .grid import table` is a package's own import: it is written
+    as Python, and `table` is never pasted from the library over it."""
+    out = transpile("from .grid import table\nfrom ..a.b import c\n\ndef f() -> int\n  table(1)\n")
+    assert "from .grid import table\n" in out and "from ..a.b import c\n" in out
+    out = transpile("from math import factorial\n\ndef f() -> int\n  factorial(3)\n")
+    assert "def factorial" not in out
+
+
+def test_python_generics_take_ellipsis_and_type_lists():
+    """`Tuple[Cell, ...]` and `Callable[[Any], bool]` pass through as Python
+    wrote them; an `A -> B` type in a file that imports Callable adds no
+    second import."""
+    src = (
+        "from typing import Any, Callable, Tuple\n\n"
+        "X: Tuple[int, ...] = (1,)\n\n"
+        "def f(ok: Callable[[Any], bool], g: int -> bool) -> Tuple[int, ...]\n  X\n"
+    )
+    out = transpile(src)
+    assert "X: Tuple[int, ...] = (1,)" in out
+    assert "def f(ok: Callable[[Any], bool], g: Callable[[int], bool]) -> Tuple[int, ...]:" in out
+    assert out.count("from typing import") == 1
+
+
+def test_a_starred_item_in_a_bracketed_tuple():
+    out = transpile("def f(e: [int]) -> (int, int)\n  (*e, 1) + (1, *e)\n")
+    assert "return (*e, 1) + (1, *e)" in out

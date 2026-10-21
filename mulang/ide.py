@@ -32,9 +32,12 @@ from . import (
     BUILTINS,
     DOCS,
     HELPERS,
+    NATIVE,
     PATHS,
     RUNTIME,
     MuError,
+    find_module,
+    load_module,
     mu_type,
     profile,
     transpile,
@@ -239,7 +242,7 @@ def unclosed(lines):
     return lines, blanked
 
 
-def repaired(lines):
+def repaired(lines, path=None):
     """Transpile the lines, blanking any line that fails until it parses:
     (code, origin, blanked). When a line the parser names is blank already,
     the nearest line above it goes; an error with no line starts from the
@@ -247,7 +250,7 @@ def repaired(lines):
     lines, blanked = unclosed(lines)
     for _ in range(TRIES):
         try:
-            code, origin = transpile("\n".join(lines) + "\n", mapped=True)
+            code, origin = transpile("\n".join(lines) + "\n", mapped=True, path=path)
             return code, origin, blanked
         except MuError as err:
             m = LINE_ERR.match(str(err))
@@ -306,6 +309,7 @@ class File:
 
     def __init__(self, req):
         self.root = req.get("root") or os.getcwd()
+        self.path = req.get("path")  # the file's own, where its mu imports are found
         profile(self.root)
         self.lines = req["text"].split("\n")
         self.line, self.col = req["line"], req["col"]
@@ -315,7 +319,7 @@ class File:
 
     def build(self, lines=None):
         """Transpile (a variant of) the lines; True when something parsed."""
-        got = repaired(self.lines if lines is None else lines)
+        got = repaired(self.lines if lines is None else lines, self.path)
         if got is None:
             return False
         self.code, self.origin, self.blanked = got
@@ -437,8 +441,33 @@ def spec_hover(word):
     return {"contents": "```mu\n" + "\n".join(docs()[word]) + "\n```"}
 
 
+MU_IMPORT = re.compile(r"^\s*from ([\w.]+) import (.+)$")
+
+
+def native_location(f, name):
+    """Where a name the file imports from a mu module is defined, or None."""
+    here = str(Path(f.path).parent) if f.path else f.root
+    for line in f.lines:
+        m = MU_IMPORT.match(line)
+        if not m or name not in {n.strip() for n in m.group(2).strip("() ").split(",")}:
+            continue
+        found = find_module(m.group(1), here)
+        if found is None:
+            return None
+        try:
+            h = NATIVE[load_module(found)[name]]
+        except (MuError, KeyError):
+            return None
+        return (h.path, h.line, 0)
+    return None
+
+
 def definition(req):
     f = File(req)
+    w = word_at(f.text, f.col)
+    if w and native_location(f, w[0]):
+        loc = native_location(f, w[0])
+        return [{"path": loc[0], "line": loc[1], "col": loc[2]}]
     if not f.build() or f.at() is None:
         w = word_at(f.text, f.col)
         loc = helper_location(w[0]) if w else None
