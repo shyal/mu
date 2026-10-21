@@ -1203,3 +1203,19 @@ def test_a_type_may_be_a_python_generic():
     out = transpile("from typing import Optional\nx: Optional[str] = none\ny: dict[str, [int]] = {}\n")
     assert "x: Optional[str] = None" in out
     assert "y: dict[str, list[int]] = {}" in out
+
+
+def test_async_def_awaits():
+    """`async def` is a coroutine; `await` waits inside it, and the last
+    line is returned."""
+    src = (
+        "import asyncio\n\nasync def get(k: str) -> str\n  await asyncio.sleep(0)\n  k * 2\n\n"
+        "async def main() -> [str]\n  await asyncio.gather(*[get(k) for k in 'ab'])\n\n"
+        "assert asyncio.run(main()) == ['aa', 'bb']\n"
+    )
+    out = transpile(src)
+    assert "async def get(k: str) -> str:" in out
+    assert "return await asyncio.gather(" in out
+    exec(out, {})
+    out = transpile("class Solution\n  @staticmethod\n  async def f() -> int\n    1\n")
+    assert "    @staticmethod\n    async def f() -> int:" in out

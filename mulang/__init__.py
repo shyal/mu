@@ -34,6 +34,7 @@ NOT_ARGS = {"from", "in", "not", "and", "or", "if", "else", "is", "for", "while"
 NOT_ARGS |= {"elif", "def", "memo", "return", "del", "assert", "pass", "break"}
 NOT_ARGS |= {"continue", "import", "extends", "yield", "class"}
 NOT_ARGS |= {"as", "with", "try", "except", "finally", "raise", "global", "nonlocal"}
+NOT_ARGS |= {"async"}
 AUGMENTED = {
     "=",
     "+=",
@@ -192,6 +193,7 @@ class Py(str):
     rng = None  # (lo, hi_exclusive) when the expression is a range
     parts = None  # the member types when a type is a parenthesized tuple
     call = False  # a call that dropped its brackets, `f x`
+    is_async = False  # the name of an `async def`
     convert = None  # the line after `int(a), b = ...` that converts a
     orparts = None  # (x, d) when the expression is exactly x or d
     cmpparts: "tuple[str, str, str] | None" = (
@@ -638,6 +640,7 @@ class Parser:
             while self.toks[j][0] not in ("NEWLINE", "EOF"):
                 j += 1
             j += self.toks[j][0] == "NEWLINE"
+        j += self.toks[j][:2] == ("NAME", "async")
         return self.toks[j][:2] in (("NAME", "def"), ("NAME", "class"))
 
     def import_line(self):
@@ -689,7 +692,8 @@ class Parser:
             line = self.next()[2]
             out.append((line, self.expr()))
             self.expect_kind("NEWLINE")
-        if out and not (self.at("def") or self.at("memo") or self.at("class")):
+        defs = self.at("def") or self.at("async") and self.at("def", 1)
+        if out and not (defs or self.at("memo") or self.at("class")):
             t = self.peek()
             raise MuError(
                 f"line {out[-1][0]}: a decorator goes above a def, a memo or a class",
@@ -703,6 +707,12 @@ class Parser:
             return ("import", self.import_line())
         if self.at("def"):
             return self.def_stmt()
+        if self.at("async") and self.at("def", 1):
+            # `async def f()`: Python's coroutine, its body may `await`
+            self.next()
+            s = self.def_stmt()
+            s[1].is_async = True
+            return s
         if self.at("class"):
             return self.class_stmt()
         if self.at("extends"):
@@ -943,7 +953,7 @@ class Parser:
 
     def def_stmt(self):
         self.expect("def")
-        name = self.expect_kind("NAME")
+        name = Py(self.expect_kind("NAME"))
         self.expect("(")
         params, keyword_only = [], False
         while not self.at(")"):
@@ -1344,6 +1354,9 @@ class Parser:
         if self.at("-") or self.at("~"):
             op = self.next()[1]
             return Py(f"{op}{self.unary()}")
+        if self.at("await"):
+            self.next()
+            return Py(f"await {self.unary()}")
         e = self.postfix()
         if self.at("**"):
             self.next()
@@ -2121,7 +2134,8 @@ class Emitter:
         self.decorators(s, ind)
         if is_memo(s):
             self.out(ind, "@cache")
-        self.out(ind, f"def {name}({', '.join(sig)}){arrow}:")
+        word = "async def" if getattr(name, "is_async", False) else "def"
+        self.out(ind, f"{word} {name}({', '.join(sig)}){arrow}:")
         if self.scopes:
             shared = assigned(body) & set().union(*self.scopes) - names
             if shared:
@@ -2332,6 +2346,7 @@ STATEMENT_WORDS = {
     "def", "memo", "for", "in", "if", "elif", "else", "while", "return", "and",
     "or", "not", "from", "first", "break", "continue", "yield", "class", "extends",
     "with", "as", "try", "except", "finally", "raise", "global", "nonlocal",
+    "async", "await",
 }  # fmt: skip
 TIGHT = {"..", "..<", "."}
 
