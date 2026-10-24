@@ -77,7 +77,7 @@ TOKEN = re.compile(
     r"|(?P<prime>(?<=\w)')"
     r"|(?P<str>[fFrRbB]{0,2}'[^'\n]*'|[fFrRbB]{0,2}\"[^\"\n]*\")"
     r"|(?P<name>[A-Za-z_]\w*)"
-    r"|(?P<op>\.\.\.|\.\.<|\.\.|->|<-|//=|<<=|>>=|\*\*=|==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|@=|:="
+    r"|(?P<op>\.{4,}|\.\.\.|\.\.<|\.\.|->|<-|//=|<<=|>>=|\*\*=|==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|@=|:="
     r"|<<|>>|//|\*\*|[-+*/%<>=()\[\]{},:|.&^~?@])"
 )
 
@@ -194,6 +194,7 @@ class Py(str):
     parts = None  # the member types when a type is a parenthesized tuple
     call = False  # a call that dropped its brackets, `f x`
     pair = False  # a `k: v` or `**d` item of a dict
+    repeats = None  # [(item, copies)] when a right side of = repeats, `[]..`
     is_async = False  # the name of an `async def`
     convert = None  # the line after `int(a), b = ...` that converts a
     orparts = None  # (x, d) when the expression is exactly x or d
@@ -1053,14 +1054,22 @@ class Parser:
             elif self.peek()[1] in AUGMENTED and self.peek()[0] == "OP":
                 op = self.next()[1]
                 rhs = (
-                    self.arg() if op == "=" and self.lambda_ahead() else self.exprlist()
+                    self.arg()
+                    if op == "=" and self.lambda_ahead()
+                    else self.exprlist(repeat=op == "=")
                 )
                 sides = [lhs]
                 while op == "=" and self.at("="):
                     # chained: `a = b = 0` keeps every target in lhs
                     self.next()
                     sides.append(rhs)
-                    lhs, rhs = Py(f"{lhs} = {rhs}"), self.exprlist()
+                    if rhs.repeats:
+                        raise MuError(f"line {line}: a repeat `x..` cannot be in a chained `=`")
+                    lhs, rhs = Py(f"{lhs} = {rhs}"), self.exprlist(repeat=True)
+                    if rhs.repeats:
+                        raise MuError(f"line {line}: a repeat `x..` cannot be in a chained `=`")
+                if op == "=" and len(sides) == 1:
+                    rhs = filled(lhs, rhs, line)
                 # `int(a) = x` alone converts a, as `int(a), b = x` does
                 alone = op == "=" and len(sides) == 1 and CONVERT.fullmatch(lhs)
                 if op == "=" and not alone and any(computed(x) for x in sides):
@@ -1386,15 +1395,42 @@ class Parser:
 
     # expressions, lowest precedence first
 
-    def exprlist(self):
-        parts = [self.starred()]
+    def exprlist(self, repeat=False):
+        """Items apart by commas. With repeat, an item may end in dots, one
+        copy of it per dot: `0..., 1..` is 0, 0, 0, 1, 1."""
+        parts, counts = [self.starred()], [self.copies(repeat)]
         while self.at(","):
             self.next()
             if self.peek()[0] in ("NEWLINE", "EOF") or self.peek()[1] in ("=", ")"):
                 parts[-1] += ","  # a trailing comma: `x = 1,` is a tuple
                 break
             parts.append(self.starred())
-        return parts[0] if len(parts) == 1 else Py(", ".join(parts))
+            counts.append(self.copies(repeat))
+        out = parts[0] if len(parts) == 1 else Py(", ".join(parts))
+        if any(c > 1 for c in counts):
+            out = Py(out)
+            out.repeats = list(zip(parts, counts))
+        return out
+
+    def repeat_ahead(self):
+        """The next token is dots that end an item: `[]..,` or `0...` at
+        the end of the line."""
+        t = self.peek()
+        return (
+            t[0] == "OP"
+            and len(t[1]) >= 2
+            and set(t[1]) == {"."}
+            and (self.peek(1)[0] in ("NEWLINE", "EOF") or self.at(",", 1))
+        )
+
+    def copies(self, allowed):
+        """The copies of the item just read: the count of its dots, else 1."""
+        if not self.repeat_ahead():
+            return 1
+        t = self.next()
+        if not allowed:
+            raise MuError(f"line {t[2]}: `{t[1]}` repeats a value only on the right of `=`")
+        return len(t[1])
 
     def starred(self):
         """An item of a comma list, which may unpack: `a, *rest = xs`."""
@@ -1493,7 +1529,7 @@ class Parser:
 
     def range_(self):
         e = self.bitor()
-        if self.at("..") or self.at("..<"):
+        if (self.at("..") and not self.repeat_ahead()) or self.at("..<"):
             inclusive = self.next()[1] == ".."
             hi = self.bitor()
             end = f"{hi} + 1" if inclusive else hi
@@ -1604,6 +1640,16 @@ class Parser:
             else:
                 return e
 
+    def glued(self, num):
+        """The token after the number num starts where num ends, and it is a
+        name or `(`: `2x`, `2(a)`. A space between them is an error."""
+        t = self.peek()
+        if t[2] != num[2] or not (t[0] == "NAME" or t[1] == "("):
+            return False
+        if t[0] == "NAME" and (t[1] in NOT_ARGS or t[1] in KEYWORDS):
+            return False  # `1if c else 0`
+        return t[1].col == num[1].col + len(num[1])
+
     def subscript(self):
         """An index `i`, a slice `lo:hi:step` with parts optional, or several
         of them apart by commas: `x[:, -1]`, `x[..., :3]`."""
@@ -1646,7 +1692,28 @@ class Parser:
             return Py(" ".join(parts))
         if kind == "NUM":
             self.next()
-            return Py(val)
+            nxt = self.peek()
+            if not self.glued(t):
+                if nxt[0] == "NAME" and nxt[2] == t[2] and nxt[1] not in NOT_ARGS | KEYWORDS:
+                    glue = "" if nxt[1][0] in "eE" else f"{val}{nxt[1]}, with no space, or "
+                    raise MuError(f"line {t[2]}: write {glue}{val} * {nxt[1]}")
+                return Py(val)
+            # `2x` is 2 * x, `2(a + b)` is 2 * (a + b); `**` binds tighter,
+            # so 2x**2 is 2 * x**2, and the product is one operand: 1/2x is
+            # 1 / (2 * x)
+            if nxt[0] == "NAME" and nxt[1][0] in "eE":
+                raise MuError(
+                    f"line {t[2]}: `{val}{nxt[1]}` reads as an exponent; write {val} * {nxt[1]}"
+                )
+            if nxt[0] == "NAME" and val == "0" and nxt[1][0] in "xXbBoO":
+                raise MuError(
+                    f"line {t[2]}: `0{nxt[1]}` reads as a hex, binary or octal number; write 0 * {nxt[1]}"
+                )
+            e = self.postfix_chain()
+            if self.at("**"):
+                self.next()
+                e = Py(f"{e} ** {self.unary()}")
+            return Py(f"({val} * {e})")
         if val == "..." and kind == "OP":
             self.next()
             return Py("...")
@@ -1992,6 +2059,38 @@ NAME = re.compile(r"[A-Za-z_]\w*")
 
 
 # names a mu file reads without binding them
+def filled(lhs, rhs, line):
+    """The right side of `targets = rhs`, one value per target, when rhs
+    repeats (`[].., 0` is [], [], 0) or is one scalar literal for several
+    targets (`a, b, c = 0` is 0, 0, 0). Each copy is its own value: the
+    lists of `[]..` are not the same list."""
+    names = split_top(lhs) if not lhs.endswith(",") else [lhs]
+    if rhs.repeats:
+        if any(n.strip().startswith("*") for n in names):
+            raise MuError(f"line {line}: a repeat `x..` cannot fill a starred target")
+        values = [v for v, c in rhs.repeats for _ in range(c)]
+        if len(values) != len(names):
+            raise MuError(f"line {line}: {len(names)} names, {len(values)} values")
+        return Py(", ".join(values))
+    if len(names) > 1 and scalar(rhs):
+        return Py(", ".join([rhs] * len(names)))
+    return rhs
+
+
+def scalar(text):
+    """Whether text is a literal that Python cannot unpack: a number, inf,
+    True, False or None, with a sign or not."""
+    try:
+        node = ast.parse(text.strip(), mode="eval").body
+    except SyntaxError:
+        return False
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    if isinstance(node, ast.Name):
+        return node.id == "inf"
+    return isinstance(node, ast.Constant) and not isinstance(node.value, (str, bytes))
+
+
 def split_top(text):
     """Split at commas outside brackets."""
     parts, depth, cur = [], 0, ""
@@ -2618,6 +2717,9 @@ def gap(prev, cur, unary, subscript, paren=False):
         return " "  # a pop inside a comprehension: `[h . for _ in xs]`
     if cv in TIGHT or pv in TIGHT or unary:
         return ""
+    value = pk in ("NUM", "STR") or pk == "NAME" and pv not in NOT_ARGS | KEYWORDS
+    if ck == "OP" and set(cv) == {"."} and (value or pv in ")]}"):
+        return ""  # a repeat: `[]..`, `0...`
     if subscript and pk == "OP" and pv == ":":
         return ""  # a slice: a[i:j], a[::-1]
     if ck == "OP" and cv in "([":
@@ -2867,7 +2969,7 @@ def fmt(src):
             if lines and (blank or set_apart(lines[-1], level, body, in_class)):
                 lines.append(None)
             blank = False
-        pos = 0
+        pos, glue = 0, -1  # glue: where a number just ended
         while pos < len(line):
             long = triple(rows, k, pos)
             if long:
@@ -2884,7 +2986,11 @@ def fmt(src):
             val = m.group()
             if m.lastgroup == "op":
                 depth += (val in "([{") - (val in ")]}")
+            if m.lastgroup == "name" and buf and buf[-1][0] == "NUM" and glue == m.start():
+                buf[-1] = ("NUM", buf[-1][1] + val)  # `2x` stays one token
+                continue
             buf.append((m.lastgroup.upper(), val))
+            glue = pos if m.lastgroup == "num" else -1
         if depth and buf and buf[-1][0] != "NL":
             buf.append(("NL", ""))  # a line break inside brackets is kept
         if depth == 0 and buf:

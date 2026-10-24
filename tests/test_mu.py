@@ -1348,3 +1348,66 @@ def test_python_generics_take_ellipsis_and_type_lists():
 def test_a_starred_item_in_a_bracketed_tuple():
     out = transpile("def f(e: [int]) -> (int, int)\n  (*e, 1) + (1, *e)\n")
     assert "return (*e, 1) + (1, *e)" in out
+
+
+def test_one_scalar_literal_fills_every_name():
+    out = transpile("a, b, c = 0\nlo, hi = -inf\nok, done = false\n")
+    assert "a, b, c = 0, 0, 0\n" in out
+    assert "lo, hi = -inf, -inf\n" in out
+    assert "ok, done = False, False\n" in out
+    out = transpile("a, b = 'xy'\nc, d = pair\n")
+    assert "a, b = 'xy'\n" in out and "c, d = pair\n" in out
+
+
+def test_dots_repeat_an_item_one_copy_per_dot():
+    src = "x = 1\ny = 2\np, q, r, s, t = 0..., 1..\na, b, c, d = 2x.., 2y..\nres, path, used = []...\n"
+    out = transpile(src)
+    assert "p, q, r, s, t = 0, 0, 0, 1, 1\n" in out
+    assert "a, b, c, d = (2 * x), (2 * x), (2 * y), (2 * y)\n" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["res"] == [] and ns["res"] is not ns["path"]
+    assert "a, b, c, d, e = 0, 0, 0, 0, 1\n" in transpile("a, b, c, d, e = 0...., 1\n")
+
+
+def test_a_ret_line_repeats():
+    out = transpile("def f() -> [int]\n  ret res, seen = []..\n  res <- 1\n")
+    assert "res, seen = [], []\n" in out and "return res\n" in out
+
+
+def test_a_repeat_must_fill_every_name_once():
+    for src, msg in [
+        ("a, b = 0..., 1\n", "2 names, 4 values"),
+        ("def f()\n  return 0..\n", "only on the right of `=`"),
+        ("a = b = 0..\n", "chained"),
+        ("*a, b = 0..\n", "starred"),
+    ]:
+        with pytest.raises(MuError, match=msg):
+            transpile(src)
+    assert "range(0, n + 1)" in transpile("xs = 0..n\n")
+
+
+def test_a_number_before_a_name_multiplies():
+    out = transpile(
+        "n = 5\nk = 2\na = 1 + 8n\nb = k * (2n + k - 1) // 2\nc = 2(n + 1)\n"
+        "d = 1/2n\ne1 = 2n**2\nf = 2xs[1] if (xs := [1, 3]) else 0\ng = 1if n else 0\n"
+    )
+    ns = {}
+    exec(out, ns)
+    assert (ns["a"], ns["b"], ns["c"], ns["d"], ns["e1"], ns["g"]) == (41, 11, 12, 0.1, 50, 1)
+    assert "a = 1 + (8 * n)\n" in out
+
+
+def test_a_number_before_a_name_refuses_a_space_and_number_letters():
+    for src, msg in [
+        ("n = 1\nx = 2 n\n", "write 2n, with no space, or 2 \\* n"),
+        ("e = 1\nx = 2e\n", "exponent"),
+        ("x = 0\ny = 0x\n", "hex"),
+    ]:
+        with pytest.raises(MuError, match=msg):
+            transpile(src)
+
+
+def test_fmt_keeps_a_number_on_its_name_and_dots_on_their_item():
+    src = "res, path = []..,  [0]\nx = 2x**2 + 3(a+b)\nz = 1 if c else ...\n"
+    assert fmt(src) == "res, path = [].., [0]\nx = 2x ** 2 + 3(a + b)\nz = 1 if c else ...\n"
