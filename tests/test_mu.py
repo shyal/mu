@@ -653,11 +653,21 @@ def test_a_helper_passed_by_name_is_pasted():
 def test_scan_reverse_folds_from_the_right():
     """`scan(max, xs, reverse=True)` is the running max of every suffix."""
     src = "def f(xs: [int]) -> [int]\n  scan(max, xs, reverse=True)\n"
-    assert "list(accumulate(xs[::-1], max))[::-1]" in transpile(src)
-    src = "def f(xs: [int]) -> [int]\n  scan(+, xs, reverse=True)\n"
+    assert "reversed(list(accumulate(xs[::-1], max)))" in transpile(src)
+    src = "def f(xs: [int]) -> [int]\n  scan(+, xs, reverse=True, type=list)\n"
     assert "list(accumulate(xs[::-1]))[::-1]" in transpile(src)
     src = "def f(xs: [int]) -> [int]\n  scan(max, xs)\n"
     assert "accumulate(xs, max)" in transpile(src)
+
+
+def test_scan_type_builds_a_list_or_a_tuple():
+    """`type=list` or `type=tuple` builds the scan; with no type it is an iterator."""
+    src = "def f(xs: [int]) -> [int]\n  scan(min, xs, type=list)\n"
+    assert "list(accumulate(xs, min))" in transpile(src)
+    src = "def f(xs: [int]) -> [int]\n  scan(min, xs, reverse=true, type=tuple)\n"
+    assert "tuple(accumulate(xs[::-1], min))[::-1]" in transpile(src)
+    src = "def f(xs: [int]) -> [int]\n  scan(min, xs, type=none)\n"
+    assert "return accumulate(xs, min)" in transpile(src)
 
 
 def test_every_spec_version_is_linked_from_the_readme():

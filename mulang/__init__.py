@@ -1857,7 +1857,8 @@ class Parser:
             if op == "*":
                 self.need("import operator")
                 op = "operator.mul"
-            call = f"accumulate({xs})" if op == "+" else f"accumulate({xs}, {op})"
+            # type=list or type=tuple builds the result; with no type it is an iterator
+            kind = kw.pop("type", "None")
             if kw.pop("reverse", None) == "True":
                 # scan from the right: fold the reversed list, then flip it back
                 call = (
@@ -1865,8 +1866,11 @@ class Parser:
                     if op == "+"
                     else f"accumulate({xs}[::-1], {op})"
                 )
-                return Py(f"list({call})[::-1]")
-            return Py(call)
+                if kind == "None":
+                    return Py(f"reversed(list({call}))")
+                return Py(f"{kind}({call})[::-1]")
+            call = f"accumulate({xs})" if op == "+" else f"accumulate({xs}, {op})"
+            return Py(call if kind == "None" else f"{kind}({call})")
         if fn == "counter":
             self.need("from collections import Counter")
             fn = "Counter"
