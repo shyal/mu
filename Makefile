@@ -1,10 +1,15 @@
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
 VSCODE := $(shell sed -n 's/^  "version": "\(.*\)",/\1/p' vscode/package.json)
 
-# the leet venv has mu and pydsa as editable installs, so the tests see both
-PY ?= $(HOME)/dev/leet/.venv/bin/python
+PY := .venv/bin/python
 
-.PHONY: release
+.PHONY: venv release
+
+# the dev venv: this repo and its sibling as editable installs, so a change
+# in either is live, with the test, docs and drawing extras
+venv:
+	uv venv --python 3.13 .venv
+	uv pip install --python $(PY) -e '.[test,ide,docs]' -e '../pydsa[draw]'
 
 # push master (the docs build), tag the extension when its version has no
 # tag yet (the .vsix release), then publish mu-language to PyPI
