@@ -210,7 +210,7 @@
         },
         {
           "name": "keyword.operator.range.mu",
-          "match": "\\.\\.<|\\.\\."
+          "match": "\\.\\.<|\\.{2,}"
         },
         {
           "name": "keyword.operator.arrow.mu",

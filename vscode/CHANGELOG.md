@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+mu 0.12: a sequence of dots is one operator, so the repeat `0...,` is not
+coloured as a range and a pop. In `2x` the number and the name have their
+own colours.
+
 ## 0.2.0
 
 mu 0.11: a `'` directly after a name is a prime (`m'`) and is coloured

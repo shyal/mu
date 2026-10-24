@@ -590,6 +590,34 @@ def test_vscode_grammar_highlights_the_item_underscore():
     assert {"include": "#item"} in grammar["patterns"]
 
 
+def test_vscode_grammar_colours_a_run_of_dots_as_one_operator():
+    """`0...,` is a repeat, not a range and a pop; `2x` is a number then a name."""
+    import json
+
+    grammar = json.loads(
+        (REPO / "vscode" / "syntaxes" / "mu.tmLanguage.json").read_text()
+    )
+    ops = grammar["repository"]["operator"]["patterns"]
+    rng = re.compile(next(p for p in ops if p["name"] == "keyword.operator.range.mu")["match"])
+    assert [m.group() for m in rng.finditer("a, b = 0..., 1.., 0..<n, xs[...]")] == [
+        "...", "..", "..<", "...",
+    ]
+    number = re.compile(grammar["repository"]["number"]["match"])
+    assert [m.group() for m in number.finditer("1 + 8n, 0..n, x2")] == ["1", "8", "0"]
+
+
+def test_pygments_lexer_reads_ranges_repeats_and_a_number_before_a_name():
+    from pygments.token import Name, Number, Operator
+
+    from mulang.pygments_lexer import MuLexer
+
+    toks = [(t, v) for t, v in MuLexer().get_tokens("a, b = 0..., 1..\nfor i in 0..<n\ny = 8n\n")]
+    assert (Number.Integer, "0") in toks and (Operator, "...") in toks
+    assert (Operator, "..") in toks and (Operator, "..<") in toks
+    assert (Number.Integer, "8") in toks and (Name, "n") in toks
+    assert not any(t in Number.Float for t, _ in toks)
+
+
 def test_transpile_maps_every_python_line_to_its_mu_line():
     """transpile(src, mapped=True) gives, per output line, the mu line it
     came from; pasted helpers, blank lines and the class line have none."""
