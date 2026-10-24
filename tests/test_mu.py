@@ -670,6 +670,26 @@ def test_scan_type_builds_a_list_or_a_tuple():
     assert "return accumulate(xs, min)" in transpile(src)
 
 
+def test_a_dict_mu_makes_gives_its_keys_as_attributes():
+    """`dict(a=1)`, `{k: v}`, `{}` and a dict comprehension are a Rec, so
+    `d.k` is `d['k']`; a set and a default dict stay as Python has them."""
+    src = (
+        "a = dict(a=1)\nb = {'x': 2}\nb.y = 3\nc = {}\n"
+        "d = {k: k for k in range(2)}\ns = {1, 2}\ng = {:list}\n"
+    )
+    out = transpile(src)
+    assert "a = Rec(a=1)\n" in out
+    assert "b = Rec({'x': 2})\n" in out
+    assert "c = Rec()\n" in out
+    assert "d = Rec({k: k for k in range(2)})\n" in out
+    assert "s = {1, 2}\n" in out
+    assert "g = defaultdict(list)\n" in out
+    ns = {}
+    exec(out, ns)
+    assert (ns["a"].a, ns["b"], ns["d"][1]) == (1, {"x": 2, "y": 3}, 1)
+    assert not hasattr(ns["c"], "q")
+
+
 def test_every_spec_version_is_linked_from_the_readme():
     """The current version has a spec, and the README links every spec."""
     specs = sorted(p.name for p in (REPO / "spec").glob("v*.md"))
@@ -1133,7 +1153,7 @@ def test_typed_assignments_and_dataclass_fields():
 
 def test_adjacent_strings_join_and_a_dict_unpacks():
     out = transpile("def f(d)\n  {**d, 'k': 'a' 'b'}\n")
-    assert "return {**d, 'k': 'a' 'b'}" in out
+    assert "return Rec({**d, 'k': 'a' 'b'})" in out
 
 
 def test_a_staticmethod_takes_no_self_and_a_classmethod_takes_cls():
@@ -1212,7 +1232,7 @@ def test_a_lambda_may_be_a_branch_of_a_conditional():
 def test_a_type_may_be_a_python_generic():
     out = transpile("from typing import Optional\nx: Optional[str] = none\ny: dict[str, [int]] = {}\n")
     assert "x: Optional[str] = None" in out
-    assert "y: dict[str, list[int]] = {}" in out
+    assert "y: dict[str, list[int]] = Rec()" in out
 
 
 def test_async_def_awaits():

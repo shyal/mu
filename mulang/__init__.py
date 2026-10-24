@@ -193,6 +193,7 @@ class Py(str):
     rng = None  # (lo, hi_exclusive) when the expression is a range
     parts = None  # the member types when a type is a parenthesized tuple
     call = False  # a call that dropped its brackets, `f x`
+    pair = False  # a `k: v` or `**d` item of a dict
     is_async = False  # the name of an `async def`
     convert = None  # the line after `int(a), b = ...` that converts a
     orparts = None  # (x, d) when the expression is exactly x or d
@@ -247,6 +248,28 @@ RUNTIME = {
         else:
             list.__setitem__(self, k, v)''',
         "A list of rows that also takes a (row, col) pair as an index.",
+    ),
+    "Rec": Helper(
+        (),
+        (),
+        '''class Rec(dict):
+    """A dict that also gives its keys as attributes: d.k is d["k"]."""
+
+    def __getattr__(self, k):
+        try:
+            return self[k]
+        except KeyError:
+            raise AttributeError(k) from None
+
+    def __setattr__(self, k, v):
+        self[k] = v
+
+    def __delattr__(self, k):
+        try:
+            del self[k]
+        except KeyError:
+            raise AttributeError(k) from None''',
+        "A dict that also gives its keys as attributes: d.k is d[\"k\"].",
     ),
     "cache": Helper(
         (),
@@ -1675,7 +1698,7 @@ class Parser:
         self.expect(open_)
         if self.at(close):
             self.next()
-            return Py(open_ + close)
+            return self.rec("") if open_ == "{" else Py(open_ + close)
         if open_ == "{" and self.at(":"):  # {:list} is defaultdict(list)
             self.next()
             default = self.arg()
@@ -1688,7 +1711,8 @@ class Parser:
         if self.at("for"):
             gen = self.comprehension()
             self.expect(close)
-            return Py(f"{open_}{first}{gen}{close}")
+            out = Py(f"{open_}{first}{gen}{close}")
+            return self.rec(out) if first.pair else out
         items = [first]
         while self.at(","):
             self.next()
@@ -1696,17 +1720,27 @@ class Parser:
                 break
             items.append(self.item(open_))
         self.expect(close)
-        return Py(open_ + ", ".join(items) + close)
+        out = Py(open_ + ", ".join(items) + close)
+        return self.rec(out) if first.pair else out
+
+    def rec(self, d):
+        """A dict mu makes is a Rec, so `d.k` reads the key k: `{}` is
+        Rec(), `{'a': 1}` is Rec({'a': 1})."""
+        self.need(helper="Rec")
+        return Py(f"Rec({d})")
 
     def item(self, open_):
         if self.at("*") or (open_ == "{" and self.at("**")):
             star = self.next()[1]
-            return Py(f"{star}{self.expr()}")
+            e = Py(f"{star}{self.expr()}")
+            e.pair = star == "**"
+            return e
         e = self.expr()
         if open_ == "{" and self.at(":"):
             self.next()
             v = self.arg() if self.lambda_ahead() else self.expr()
             e = Py(f"{e}: {v}")
+            e.pair = True
         return e
 
     def collected(self, default, close):
@@ -1841,6 +1875,9 @@ class Parser:
 
     def special(self, fn, args, kwargs):
         kw = {k: v for k, v in kwargs}
+        if fn == "dict":
+            self.need(helper="Rec")
+            fn = Py("Rec")
         if fn == "ceil" and len(args) == 1 and args[0].div:
             a, b = args[0].div
             return Py(f"-(-({a}) // ({b}))")
