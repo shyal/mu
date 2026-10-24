@@ -670,6 +670,11 @@ def mu_type(node):
     return ast.unparse(node)
 
 
+# The message of `assert a op b`: both sides through `pprint.pformat`, on one
+# line each when both fit, else each side indented under its own label.
+SIDES = r"""(lambda l, r: f"left : {l.lstrip()}\nright: {r.lstrip()}" if "\n" not in l + r else f"left :\n{l}\nright:\n{r}")(*(__import__("textwrap").indent(__import__("pprint").pformat(v, width=__import__("shutil").get_terminal_size().columns - 2, sort_dicts=False), "  ") for v in (_l, _r)))"""
+
+
 class Parser:
     def __init__(self, src, primes=frozenset(), strings=frozenset()):
         self.toks = tokenize(src, primes)
@@ -2239,10 +2244,8 @@ class Emitter:
                 # shows the values the assert saw, not a second run of them
                 lhs, op, rhs = parts
                 self.out(ind, f"_l, _r = {lhs}, {rhs}")
-                msg = "left : {_l!r}\\nright: {_r!r}" + (
-                    "" if op == "==" else f"\\nop   : {op}"
-                )
-                self.out(ind, f'assert _l {op} _r, f"{msg}"')
+                tail = "" if op == "==" else f' + "\\nop   : {op}"'
+                self.out(ind, f"assert _l {op} _r, {SIDES}{tail}")
             else:
                 self.out(ind, f"assert {s[1]}")
         elif kind == "expr":

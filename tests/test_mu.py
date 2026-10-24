@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mulang import VERSION, MuError, fmt, ide, transpile
+from mulang import SIDES, VERSION, MuError, fmt, ide, transpile
 
 HERE = Path(__file__).parent
 REPO = HERE.parent
@@ -910,8 +910,8 @@ def test_assert_compares_values_it_saw_once():
         "def f(x: int) -> int\n  x + 1\n\nassert f(1) == 2\nassert f(1) is true\n"
     )
     assert "_l, _r = f(1), 2\n" in out
-    assert 'assert _l == _r, f"left : {_l!r}\\nright: {_r!r}"' in out
-    assert 'assert _l is _r, f"left : {_l!r}\\nright: {_r!r}\\nop   : is"' in out
+    assert f"assert _l == _r, {SIDES}\n" in out
+    assert f'assert _l is _r, {SIDES} + "\\nop   : is"\n' in out
     src = "calls = []\n\ndef g() -> bool\n  calls <- 1\n  len(calls) == 1\n\nassert g() == false\n"
     ns = {}
     try:
