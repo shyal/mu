@@ -18,5 +18,6 @@ release:
 	git push origin master
 	git rev-parse -q --verify refs/tags/vscode-v$(VSCODE) >/dev/null || \
 		(git tag vscode-v$(VSCODE) && git push origin vscode-v$(VSCODE))
-	rm -rf dist && uv build && uv publish
+	rm -rf dist && uv build
+	. ./.envrc && uv publish  # .envrc holds UV_PUBLISH_TOKEN
 	@echo "mu-language $(VERSION) released"
