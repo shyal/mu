@@ -1358,6 +1358,14 @@ def test_a_relative_import_stays_python_and_binds_its_names():
     assert "def factorial" not in out
 
 
+def test_a_from_line_without_import_is_a_mu_error():
+    for src in ("x = 1\nfrom operator gt, lt\n", "from operator import\n"):
+        with pytest.raises(MuError, match="expected from module import names"):
+            transpile(src)
+    with pytest.raises(MuError, match="^line 2:"):
+        transpile("x = 1\nfrom operator gt, lt\n")
+
+
 def test_python_generics_take_ellipsis_and_type_lists():
     """`Tuple[Cell, ...]` and `Callable[[Any], bool]` pass through as Python
     wrote them; an `A -> B` type in a file that imports Callable adds no

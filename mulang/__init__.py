@@ -809,6 +809,8 @@ class Parser:
             words.append(self.next()[1])
         self.next()
         if words[0] == "from":
+            if "import" not in words or words[-1] == "import":
+                raise MuError(f"line {at}: expected from module import names")
             k = words.index("import")
             names = " ".join(words[k + 1 :]).replace(" ,", ",")
             line = f"from {''.join(words[1:k])} import {names}"
