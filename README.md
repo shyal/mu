@@ -382,7 +382,7 @@ class Solution:
 # 560. Subarray Sum Equals K (prefix sums)
 class Solution
   def subarraySum(nums: [int], k: int) -> int
-    count_pairs(scan(+, [0] + nums), want=p -> p - k)
+    count_pairs(scan(+, [0] + nums), lookup=p -> p - k)
 ```
 
 <details><summary>mu</summary>
@@ -665,7 +665,7 @@ class Solution:
 # 974. Subarray Sums Divisible by K (prefix sums)
 class Solution
   def subarraysDivByK(nums: [int], k: int) -> int
-    count_pairs(scan(+, [0] + nums), by=p -> p % k)
+    count_pairs(scan(+, [0] + nums), key=p -> p % k)
 ```
 
 <details><summary>mu</summary>
@@ -802,7 +802,7 @@ class Solution
   def numSubmatrixSumTarget(matrix: [[int]], target: int) -> int
     P = [[0] * len(matrix[0]), *scan((a, b) -> [x + y for x, y in zip(a, b)], matrix)]
     strip = (a, b) -> scan(+, [0] + [y - x for x, y in zip(a, b)])
-    sum for i, j in pairs(len(P)): count_pairs(strip(P[i], P[j]), want=s -> s - target)
+    sum for i, j in pairs(len(P)): count_pairs(strip(P[i], P[j]), lookup=s -> s - target)
 ```
 
 <details><summary>mu</summary>
@@ -993,7 +993,7 @@ class Solution:
 # 1248. Count Number of Nice Subarrays (prefix sums)
 class Solution
   def numberOfSubarrays(nums: [int], k: int) -> int
-    count_pairs(scan(+, [0] + [x % 2 for x in nums]), want=p -> p - k)
+    count_pairs(scan(+, [0] + [x % 2 for x in nums]), lookup=p -> p - k)
 ```
 
 <details><summary>mu</summary>
