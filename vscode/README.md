@@ -2,7 +2,7 @@
 
 Support for [mu](https://github.com/shyal/mu), a small language that
 transpiles to Python: highlighting, formatting on save, hover, completion,
-go-to-definition, signature help, and a debugger that steps through the
+go-to-definition, signature help, rename (F2), and a debugger that steps through the
 mu file while debugpy runs the Python it produced.
 
 ## Install
@@ -34,7 +34,7 @@ Then point the extension at that interpreter if it is not `python3`:
 
 Highlighting needs nothing installed. Formatting needs `mu-language`.
 Hover, completion, go-to-definition and signature help need Jedi, which
-the `ide` extra brings. Debugging needs the Python Debugger extension
+the `ide` extra brings; rename needs only `mu-language`. Debugging needs the Python Debugger extension
 (`ms-python.debugpy`, installed as a dependency) and a debug script in the
 workspace; see below.
 

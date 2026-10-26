@@ -125,6 +125,67 @@ def test_signature_inside_a_call():
     assert ide.signature(req("signature", 2, 3)) is None
 
 
+def rename(line, col, new, text):
+    return ide.rename({**req("rename", line, col, text), "new": new})
+
+
+def test_rename_edits_every_mu_reference_and_nothing_else():
+    text = TEXT.replace("    if x ==\n", "").replace("    d = nbrs(grid, i,\n", "")
+    # res inside the def, not the res the last line binds
+    assert rename(2, 3, "out", text) == {
+        "edits": [
+            {"line": 2, "col": 2, "end": 5},
+            {"line": 7, "col": 4, "end": 7},
+            {"line": 8, "col": 2, "end": 5},
+        ]
+    }
+    # the memo, from a call; the loop index marked >i
+    assert rename(7, 11, "g", text)["edits"] == [
+        {"line": 3, "col": 7, "end": 8},
+        {"line": 5, "col": 14, "end": 15},
+        {"line": 7, "col": 11, "end": 12},
+    ]
+    assert rename(6, 7, "j", text)["edits"] == [
+        {"line": 6, "col": 7, "end": 8},
+        {"line": 7, "col": 13, "end": 14},
+    ]
+
+
+def test_rename_refuses_what_it_cannot_do_on_the_mu_lines():
+    assert "refused" in rename(2, 3, "for", TEXT)  # a keyword
+    assert "refused" in rename(2, 3, "a b", TEXT)
+    assert "refused" in rename(8, 10, "near", TEXT)  # a helper
+    # i is on line 9, which does not transpile
+    assert rename(6, 7, "j", TEXT) == {
+        "refused": "line 9 does not transpile; fix it first"
+    }
+
+
+GRID = """def walk(edges: [[int]], n: int) -> int
+  G = adjacency(edges, n, directed=False)
+  edges = len(G)
+  edges
+"""
+
+
+def test_rename_follows_a_rebound_grid_parameter():
+    # edges is a helper's name too, and the transpiler wraps a grid
+    # parameter in _in_edges and _w_edges
+    assert rename(1, 16, "es", GRID)["edits"] == [
+        {"line": 0, "col": 9, "end": 14},
+        {"line": 1, "col": 16, "end": 21},
+        {"line": 2, "col": 2, "end": 7},
+        {"line": 3, "col": 2, "end": 7},
+    ]
+
+
+def test_rename_refuses_a_name_already_seen_there():
+    assert rename(1, 16, "n", GRID) == {"refused": "`n` is taken where `edges` is seen"}
+    assert rename(1, 16, "len", GRID) == {
+        "refused": "`len` is taken where `edges` is seen"
+    }
+
+
 def test_a_bad_request_is_an_error_reply_not_a_crash():
     assert ide.answer({"id": 3, "cmd": "hover", "text": "", "line": 5, "col": 0}) == {
         "id": 3,

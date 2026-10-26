@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+Rename (F2) for a variable, parameter, def or memo of the file. The
+name is found by Python's scoping rules on the transpiled code, and each
+mu occurrence is kept only when it changes that variable alone. A rename
+the mu lines cannot carry, a name already used where the variable is
+seen, or a line that does not transpile is refused with the reason.
+
 ## 0.3.0
 
 mu 0.12: a sequence of dots is one operator, so the repeat `0...,` is not

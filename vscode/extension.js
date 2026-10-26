@@ -1,5 +1,5 @@
 // Formats .mu files by piping the document through `python -m mulang --fmt -`,
-// answers hover, completion, go-to-definition and signature help through
+// answers hover, completion, go-to-definition, signature help and rename through
 // `python -m mulang.ide` (one process per workspace root, JSON lines both
 // ways), and debugs a mu file: the workspace's debug script (the `mu.debugScript`
 // setting, `mu/session.py` in the leet repo) writes the Python with a line
@@ -229,7 +229,7 @@ class MuIde {
     this.child = child;
   }
 
-  request(cmd, document, position) {
+  request(cmd, document, position, extra = {}) {
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     const root = (folder && folder.uri.fsPath) || workspaceRoot();
     if (!root) return Promise.resolve(null);
@@ -238,7 +238,7 @@ class MuIde {
       this.start(root);
     }
     const id = ++this.seq;
-    const req = { id, cmd, root, path: document.uri.fsPath, text: document.getText(), line: position.line, col: position.character };
+    const req = { ...extra, id, cmd, root, path: document.uri.fsPath, text: document.getText(), line: position.line, col: position.character };
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) resolve(null);
@@ -319,6 +319,25 @@ function providers(ide) {
       },
       "."
     ),
+    // F2: the backend gives every edit or the reason it refuses, which the
+    // rename box shows
+    vscode.languages.registerRenameProvider("mu", {
+      prepareRename(document, position) {
+        const range = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/);
+        if (!range) throw new Error("no name under the cursor");
+        return range;
+      },
+      async provideRenameEdits(document, position, newName) {
+        const r = await ide.request("rename", document, position, { new: newName });
+        if (!r) throw new Error("mu rename: the backend gave no answer");
+        if (r.refused) throw new Error(`mu rename: ${r.refused}`);
+        const edit = new vscode.WorkspaceEdit();
+        for (const e of r.edits) {
+          edit.replace(document.uri, new vscode.Range(e.line, e.col, e.line, e.end), newName);
+        }
+        return edit;
+      },
+    }),
     vscode.languages.registerSignatureHelpProvider(
       "mu",
       {

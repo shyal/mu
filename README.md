@@ -1240,8 +1240,8 @@ The first profile is the LeetCode one in the `leet` repo,
 
 ## Tools
 
-- `mulang.ide`: hover, completion, go-to-definition and signature help
-  over JSON lines, through the transpiled Python and Jedi.
+- `mulang.ide`: hover, completion, go-to-definition, signature help and
+  rename over JSON lines, through the transpiled Python and Jedi.
 - `mulang.py2mu`: a Python solution written as mu, in as few lines as the
   language allows.
 - `vscode/`: the VS Code extension (highlighting, formatter, the ide, a

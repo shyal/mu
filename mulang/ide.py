@@ -1,11 +1,12 @@
-"""mu ide: hover, completion, go-to-definition and signature help for VS Code.
+"""mu ide: hover, completion, go-to-definition, signature help and rename for
+VS Code.
 
     python -m mulang.ide    serve: one JSON request per line on stdin,
                             one JSON reply per line on stdout
 
 A request is {"id", "cmd", "root", "text", "line", "col"}; line and col are
-0-based, as in VS Code. cmd is hover, complete, definition or signature. The
-reply is {"id", "result"}.
+0-based, as in VS Code. cmd is hover, complete, definition, signature or
+rename, which also takes "new". The reply is {"id", "result"}.
 
 The file is transpiled with its line map (transpile(mapped=True)) and Jedi
 answers on the Python. A mu line that does not parse is blanked and the rest
@@ -18,11 +19,14 @@ of a word on a mu line is taken to be the k-th on the Python lines it made.
 
 import ast
 import inspect
+import io
 import json
+import keyword
 import os
 import re
 import sys
 import textwrap
+import tokenize
 from functools import cache
 from pathlib import Path
 
@@ -605,6 +609,249 @@ def signature(req):
     }
 
 
+COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+class Scope:
+    """A Python scope: a module, def, lambda, class or comprehension, and
+    the names bound in it."""
+
+    def __init__(self, parent=None, kind="module"):
+        self.parent, self.kind = parent, kind
+        self.bound, self.globals, self.nonlocals = set(), set(), set()
+
+    def owner(self, name):
+        """The scope a name used here is bound in; None for a builtin. A
+        class body is not seen from the scopes inside it."""
+        s = self
+        while s is not None:
+            if name in s.globals:
+                while s.parent is not None:
+                    s = s.parent
+                return s if name in s.bound else None
+            if name in s.bound and name not in s.nonlocals:
+                return s
+            s = s.parent
+            while s is not None and s.parent is not None and s.kind == "class":
+                s = s.parent
+        return None
+
+    def inside(self, other):
+        s = self
+        while s is not None and s is not other:
+            s = s.parent
+        return s is other
+
+
+def names(code):
+    """[(name, 1-based line, col, scope)] for every name the Python binds
+    or reads, col in characters as tokenize counts it. None when the
+    Python does not parse."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    text = code.splitlines()
+    out = []
+
+    def chars(row, col):
+        return len(text[row - 1].encode()[:col].decode(errors="ignore"))
+
+    def use(scope, name, node):
+        out.append((name, node.lineno, chars(node.lineno, node.col_offset), scope))
+
+    def bind(scope, name, node):
+        scope.bound.add(name)
+        if hasattr(node, "lineno"):
+            use(scope, name, node)
+
+    def args(fn, scope, inner):
+        a = fn.args
+        for d in a.defaults + [d for d in a.kw_defaults if d is not None]:
+            visit(d, scope)
+        every = a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
+        for arg in filter(None, every):
+            if arg.annotation is not None:
+                visit(arg.annotation, scope)
+            bind(inner, arg.arg, arg)
+
+    def visit(node, scope):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for d in node.decorator_list:
+                visit(d, scope)
+            inner = Scope(scope, "class" if isinstance(node, ast.ClassDef) else "def")
+            if inner.kind == "class":
+                for b in node.bases + node.keywords:
+                    visit(b, scope)
+            else:
+                args(node, scope, inner)
+                if node.returns is not None:
+                    visit(node.returns, scope)
+            m = re.search(rf"\b(?:def|class)\s+({node.name})\b", text[node.lineno - 1])
+            scope.bound.add(node.name)
+            if m:
+                out.append((node.name, node.lineno, m.start(1), scope))
+            for b in node.body:
+                visit(b, inner)
+        elif isinstance(node, ast.Lambda):
+            inner = Scope(scope, "def")
+            args(node, scope, inner)
+            visit(node.body, inner)
+        elif isinstance(node, COMPS):
+            visit(node.generators[0].iter, scope)
+            inner = Scope(scope, "comp")
+            for k, g in enumerate(node.generators):
+                if k:
+                    visit(g.iter, inner)
+                visit(g.target, inner)
+                for c in g.ifs:
+                    visit(c, inner)
+            for part in ("elt", "key", "value"):
+                if hasattr(node, part):
+                    visit(getattr(node, part), inner)
+        elif isinstance(node, ast.NamedExpr):
+            visit(node.value, scope)
+            s = scope
+            while s.kind == "comp":
+                s = s.parent
+            bind(s, node.target.id, node.target)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                use(scope, node.id, node)
+            else:
+                bind(scope, node.id, node)
+        elif isinstance(node, ast.alias):
+            bind(scope, (node.asname or node.name).split(".")[0], node)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            scope.bound.add(node.name)
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            decl = scope.globals if isinstance(node, ast.Global) else scope.nonlocals
+            decl.update(node.names)
+        else:
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+
+    visit(tree, Scope())
+    return out
+
+
+LAYOUT = {tokenize.INDENT, tokenize.DEDENT, tokenize.NEWLINE, tokenize.NL}
+
+
+def tokens(code, origin):
+    """The tokens of the Python's lines that a mu line made: not the
+    helpers and runtime the transpiler adds, which follow the free names."""
+    try:
+        every = list(tokenize.generate_tokens(io.StringIO(code).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    return [
+        t
+        for t in every
+        if t.type not in LAYOUT
+        and t.start[0] <= len(origin)
+        and origin[t.start[0] - 1] is not None
+    ]
+
+
+def swapped(a, b, word, new):
+    """The (1-based line, col) of each `word` token of the Python a that is
+    `new` in the Python b, every other token the same but the names the
+    transpiler makes from a parameter, `_in_word` and `_w_word`; None when
+    b is not a so renamed. a and b are (code, origin)."""
+    ta, tb = tokens(*a), tokens(*b)
+    if ta is None or tb is None or len(ta) != len(tb):
+        return None
+    made = {f"_{p}_{word}": f"_{p}_{new}" for p in ("in", "w")}
+    out = set()
+    for x, y in zip(ta, tb):
+        if (x.type, x.string) == (y.type, y.string):
+            continue
+        if x.type != tokenize.NAME or y.type != tokenize.NAME:
+            return None
+        if (x.string, y.string) == (word, new):
+            out.add(x.start)
+        elif made.get(x.string) != y.string:
+            return None
+    return out
+
+
+def renamed(f, new):
+    """The edits that rename the name under the cursor to new, as
+    {"edits": [{"line", "col", "end"}]}, or {"refused": why}.
+
+    The variable is found on the Python by its scoping rules. Each mu
+    occurrence of the word is renamed alone and transpiled: it is an edit
+    when what changes in the Python is that variable only. The renamed mu
+    must then transpile to the Python with that variable renamed, or
+    nothing is changed."""
+    bad = keyword.iskeyword(new) or new in KEYWORDS or new in mulang.KEYWORDS
+    if not WORD.fullmatch(new) or bad:
+        return {"refused": f"`{new}` is not a name mu can bind"}
+    w = word_at(f.text, f.col)
+    if not w or not f.build():
+        return {"refused": "no name under the cursor"}
+    word = w[0]
+    rx = rf"\b{word}\b"
+    for k in sorted(f.blanked):
+        if re.search(rx, f.lines[k]):
+            return {"refused": f"line {k + 1} does not transpile; fix it first"}
+    base = ["" if k in f.blanked else t for k, t in enumerate(f.lines)]
+
+    def changed(edits):
+        """The Python tokens these mu edits change, or None."""
+        lines = list(base)
+        for ln, start, end in reversed(edits):
+            lines[ln] = lines[ln][:start] + new + lines[ln][end:]
+        try:
+            got = transpile("\n".join(lines) + "\n", mapped=True, path=f.path)
+        except Exception:  # any mu the edit breaks: the transpiler may not say MuError
+            return None
+        return swapped((f.code, f.origin), got, word, new)
+
+    def alone(ln, start, end):
+        return changed([(ln, start, end)])
+
+    found = names(f.code)
+    at = alone(f.line, w[1], w[2])
+    if not found or not at:
+        return {"refused": f"`{word}` is not a name here"}
+    scope = {(r, c): s for n, r, c, s in found if n == word}
+    if min(at) not in scope or scope[min(at)].owner(word) is None:
+        return {"refused": f"`{word}` is not defined in this file"}
+    own = scope[min(at)].owner(word)
+    var = {p for p, s in scope.items() if s.owner(word) is own}
+    if any(f.origin[r - 1] is None for r, _ in var):
+        return {"refused": f"`{word}` is not defined in this file"}
+    for n, r, c, s in found:
+        # new already seen where the variable is, or a use of new that the
+        # renamed variable would capture
+        seen = n == word and s.owner(word) is own and s.owner(new)
+        o = s.owner(new)
+        caught = (
+            n == new
+            and s.owner(word) is own
+            and not (o and o is not own and o.inside(own))
+        )
+        if seen or caught:
+            return {"refused": f"`{new}` is taken where `{word}` is seen"}
+    edits = []
+    for ln, text in enumerate(base):
+        for m in re.finditer(rx, text):
+            hit = alone(ln, m.start(), m.end())
+            if hit and hit <= var:
+                edits.append((ln, m.start(), m.end()))
+    if changed(edits) != var:
+        return {"refused": f"`{word}` could not be renamed on the mu lines alone"}
+    return {"edits": [{"line": ln, "col": a, "end": b} for ln, a, b in edits]}
+
+
+def rename(req):
+    return renamed(File(req), req["new"])
+
+
 SEMANTIC = ("variable", "operator", "number", "string", "keyword")
 
 
@@ -640,6 +887,7 @@ COMMANDS = {
     "complete": complete,
     "definition": definition,
     "signature": signature,
+    "rename": rename,
 }
 
 
