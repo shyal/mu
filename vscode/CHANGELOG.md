@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+mu 0.13: `mu`, the name of the block lambda around it, is coloured as
+a language variable, like `_`.
+
 ## 0.4.0
 
 Rename (F2) for a variable, parameter, def or memo of the file. The

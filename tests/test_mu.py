@@ -1447,3 +1447,149 @@ def test_a_number_before_a_name_refuses_a_space_and_number_letters():
 def test_fmt_keeps_a_number_on_its_name_and_dots_on_their_item():
     src = "res, path = []..,  [0]\nx = 2x**2 + 3(a+b)\nz = 1 if c else ...\n"
     assert fmt(src) == "res, path = [].., [0]\nx = 2x ** 2 + 3(a + b)\nz = 1 if c else ...\n"
+
+
+ISLANDS = (
+    "class Solution\n"
+    "  def countIslands(grid: [[int]], k: int) -> int\n"
+    "    sum for p in cells(grid, gt=0): {p ->\n"
+    "      total, grid[p] = grid[p], -1\n"
+    "      total + sum for q in nbrs(grid, p, gt=0): mu(q)\n"
+    "    }(p) % k == 0\n"
+)
+
+
+def test_a_block_lambda_in_a_one_line_fold_is_one_def_before_the_statement():
+    out = transpile(ISLANDS)
+    fold = "return sum([_mu1(p) % k == 0 for p in cells(grid, gt=0)])"
+    assert out.count("def _mu1(p):") == 1 and out.index("def _mu1") < out.index(fold)
+    ns: dict = {}
+    exec(out, ns)
+    grid = [[0, 2, 1, 0, 0], [0, 5, 0, 0, 5], [0, 0, 1, 0, 0], [0, 1, 4, 7, 0], [0, 2, 0, 0, 8]]
+    assert ns["Solution"]().countIslands(grid, 5) == 2
+    assert fmt(ISLANDS) == ISLANDS
+
+
+def test_a_one_line_block_lambda_recurses_as_mu():
+    src = "def fib(n: int) -> int\n  {k -> k < 2 ? k : mu(k - 1) + mu(k - 2)}(n)\n"
+    out = transpile(src)
+    assert "lambda" not in out and "def _mu1(k):" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["fib"](10) == 55
+    assert fmt(src) == src
+
+
+def test_a_block_lambda_that_assigns_an_outer_name_gets_nonlocal():
+    src = (
+        "def total(xs: [int]) -> int\n"
+        "  ret acc = 0\n"
+        "  {i ->\n"
+        "    if i < len xs\n"
+        "      acc += xs[i]\n"
+        "      mu(i + 1)\n"
+        "  }(0)\n"
+    )
+    out = transpile(src)
+    assert "    def _mu1(i):\n        nonlocal acc\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["total"]([1, 2, 3]) == 6
+
+
+def test_a_block_lambda_in_a_fold_block_is_built_once_per_item():
+    src = (
+        "def reach(G: {int: [int]}) -> int\n"
+        "  max for i in G\n"
+        "    seen = set()\n"
+        "    {j ->\n"
+        "      seen.add(j)\n"
+        "      1 + sum for k in G[j] if k not in seen: mu(k)\n"
+        "    }(i)\n"
+    )
+    out = transpile(src)
+    assert "    for i in G:\n        seen = set()\n        def _mu1(j):\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["reach"]({0: [1], 1: [2], 2: []}) == 3
+    assert fmt(src) == src
+
+
+@pytest.mark.parametrize(
+    "src, message",
+    [
+        (
+            "def f(xs: [int]) -> int\n  sum for x in xs: {y -> x + y}(1)\n",
+            "line 2: the mu block reads x from the loop around it; take x as a parameter",
+        ),
+        ("def f(xs: [int]) -> [int]\n  [{y -> x + y}(1) for x in xs]\n", "reads x from the loop"),
+        ("def f(x: int) -> int\n  mu(x)\n", "line 2: mu names the block lambda around it"),
+    ],
+)
+def test_block_lambda_errors(src, message):
+    with pytest.raises(MuError, match=re.escape(message)):
+        transpile(src)
+
+
+def test_a_first_block_is_a_def_passed_as_the_key():
+    src = (
+        "def shipWithinDays(weights: [int], days: int) -> int\n"
+        "  first cap in max weights..sum weights\n"
+        "    used, total = 1, 0\n"
+        "    for w in weights\n"
+        "      if total + w > cap\n"
+        "        used, total = used + 1, 0\n"
+        "      total += w\n"
+        "    used <= days\n"
+    )
+    out = transpile(src)
+    assert "def _first1(cap):" in out and "key=_first1)" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["shipWithinDays"]([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5) == 15
+    assert fmt(src) == src
+
+
+CLOSED = (
+    "class Solution\n"
+    "  def closedIsland(grid: [[int]]) -> int\n"
+    "    res = count for c in cells(grid, eq=0)\n"
+    "      {\n"
+    "        (c) ->\n"
+    "          grid[c] = 1\n"
+    "          closed = not is_edge(grid, *c)\n"
+    "          for n in nbrs(grid, c, eq=0)\n"
+    "            closed = mu(n) and closed\n"
+    "          closed\n"
+    "      }(c)\n"
+    "    res\n"
+)
+
+
+def test_a_brace_alone_opens_a_block_and_an_assigned_fold_block_is_lifted():
+    """The head may sit under the `{`; the fold block is the value of `=`;
+    the lambda reads nothing the block binds, so it is built before the loop."""
+    out = transpile(CLOSED)
+    assert out.index("def _mu1(c):") < out.index("acc = 0") < out.index("res = acc")
+    ns: dict = {}
+    exec(out, ns)
+    grid = [[1, 1, 1, 1, 1, 1, 1, 0], [1, 0, 0, 0, 0, 1, 1, 0], [1, 0, 1, 0, 1, 1, 1, 0], [1, 0, 0, 0, 0, 1, 0, 1], [1, 1, 1, 1, 1, 1, 1, 0]]
+    assert ns["Solution"]().closedIsland(grid) == 2
+    assert fmt(CLOSED) == CLOSED
+
+
+def test_a_block_lambda_reading_a_name_the_fold_block_binds_stays_in_the_loop():
+    src = (
+        "def reach(G: {int: [int]}) -> int\n"
+        "  ret best = max for i in G\n"
+        "    seen = set()\n"
+        "    {j ->\n"
+        "      seen.add(j)\n"
+        "      1 + sum for k in G[j] if k not in seen: mu(k)\n"
+        "    }(i)\n"
+    )
+    out = transpile(src)
+    assert "        seen = set()\n        def _mu1(j):\n" in out and "best = acc" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["reach"]({0: [1], 1: [2], 2: []}) == 3

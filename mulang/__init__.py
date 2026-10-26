@@ -22,11 +22,12 @@ import importlib.util
 import inspect
 import os
 import re
+import symtable
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.12"
+VERSION = "0.13"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that end a call written without brackets
@@ -123,6 +124,25 @@ PREFIXED = re.compile(r"[fFrRbB]{1,2}'(?!'')")
 # what a prime-marked name compiles to before the line that binds it again
 # takes the mark off: `min_price'` is __mu_prime__min_price until then
 PRIMED = "__mu_prime__"
+# the head of a block lambda: its parameters and `->`
+HEAD = r"(?:->|[A-Za-z_]\w*\s*->|\((?:\s*[A-Za-z_]\w*\s*,)*\s*(?:[A-Za-z_]\w*\s*)?\)\s*->)"
+BLOCK_HEAD = re.compile(rf"\s*{HEAD}\s*(?:#.*)?$")  # `{p ->` ends the line
+HEAD_LINE = re.compile(rf"^\s*{HEAD}\s*(?:#.*)?$")  # a line that is a head
+BLANK = re.compile(r"\s*(?:#.*)?$")  # nothing, or a comment
+
+
+def opens_block(line, pos, lines, k):
+    """Whether the `{` just read at line[pos - 1] opens a block: the lambda
+    head ends its line, `{p ->`, or the `{` ends the line and the next line
+    of code is the head."""
+    if BLOCK_HEAD.match(line, pos):
+        return True
+    if not BLANK.match(line, pos):
+        return False
+    for nxt in lines[k + 1 :]:
+        if nxt.strip() and not nxt.lstrip().startswith("#"):
+            return bool(HEAD_LINE.match(nxt))
+    return False
 
 
 class Col(str):
@@ -136,8 +156,11 @@ def tokenize(src, primes=frozenset()):
     A `'` directly after a letter, a digit or `_` is a PRIME token,
     `min_price'`. `f'`, `r'` and `b'` start a string, unless (line, column)
     of the name is in primes: the parser asks for that when the name is
-    bound."""
+    bound. Inside brackets lines run on, except after a `{` that ends its
+    line as a lambda head, `{p ->`: that brace opens a block, and the lines
+    under it are marked like any other."""
     toks, indents, depth = [], [0], 0
+    stack = []  # each open bracket; "B" for a brace that opens a block
     lines, k = src.splitlines(), -1
     while k + 1 < len(lines):
         k += 1
@@ -176,9 +199,14 @@ def tokenize(src, primes=frozenset()):
             val = Col(m.group())
             val.col = start
             if val in "([{":
-                depth += 1
+                if val == "{" and opens_block(line, pos, lines, k):
+                    stack.append("B")
+                else:
+                    depth += 1
+                    stack.append(val)
             elif val in ")]}":
-                depth -= 1
+                if not (stack and stack.pop() == "B"):
+                    depth -= 1
             toks.append((kind.upper(), val, n))
         if depth == 0 and toks and toks[-1][0] not in ("NEWLINE", "INDENT", "DEDENT"):
             toks.append(("NEWLINE", "", n))
@@ -209,6 +237,14 @@ class Py(str):
 class TargetError(MuError):
     """A `>` or `<` in the wrong place in a loop target. `names_a_target`
     lets it through, so the misuse is reported instead of read as `for xs`."""
+
+
+class Hoisted(tuple):
+    """A def the parser writes for a block lambda or a first block. It is
+    placed before the statement that holds the expression. reads: the
+    names its body reads from outside itself."""
+
+    reads = frozenset()
 
 
 class Decorated(tuple):
@@ -715,6 +751,9 @@ class Parser:
         self.memo_used = False
         self.folds = []  # (op, from, if, block) for each fold, for folds() in asserts
         self.known = [set()]  # names bound so far: the file's, then each open def's
+        self.pending = []  # Hoisted defs for the statement being parsed
+        self.mu = []  # the hidden name of each open block lambda, innermost last
+        self.hoisted = 0  # how many hidden defs are named so far
 
     # token helpers
 
@@ -835,7 +874,7 @@ class Parser:
         """An indented block, or one statement after ':' on the same line."""
         if self.at(":"):
             self.next()
-            return flat(self.simple())
+            return flat(self.placed(self.simple(), len(self.pending)))
         self.expect_kind("NEWLINE")
         self.expect_kind("INDENT")
         body = []
@@ -847,13 +886,34 @@ class Parser:
     def stmt(self):
         decorators = self.decorators()
         line = self.peek()[2]
+        mark = len(self.pending)
         node = self.stmt_at()
         if decorators:
             node = Decorated(node)
             node.decorators = decorators
+        node = self.placed(node, mark)
         for s in flat(node):
-            self.at_line[id(s)] = line
+            self.at_line.setdefault(id(s), line)
         return node
+
+    def placed(self, node, mark):
+        """node with the defs hoisted while it was parsed (from mark on)
+        placed before it: a block lambda is built where its statement runs."""
+        hoisted = self.pending[mark:]
+        del self.pending[mark:]
+        return ("stages", hoisted + flat(node)) if hoisted else node
+
+    def hoisted_reads(self, mark, tgt, line):
+        """A block lambda inside a comprehension is built before the
+        statement, where the comprehension's variable is out of reach:
+        refuse one whose body reads it."""
+        names = set(NAME.findall(tgt))
+        for d in self.pending[mark:]:
+            for name in sorted(d.reads & names):
+                raise MuError(
+                    f"line {line}: the mu block reads {name} from the loop"
+                    f" around it; take {name} as a parameter"
+                )
 
     def decorators(self):
         """The `@f` lines above a def or a memo: (line, expression) for each.
@@ -926,9 +986,11 @@ class Parser:
             head = self.fold(allow_block=True)
             if isinstance(head, tuple):
                 self.known[-1] |= set(NAME.findall(head[2]))
-                return ("foldblock", *head, self.block())
+                return ("foldblock", *head, self.lifted(self.block(), head[2]))
             self.expect_kind("NEWLINE")
             return ("expr", head)
+        if self.first_block_ahead():
+            return ("expr", self.first(block=True))
         if (
             self.at("ret")
             and self.peek(1)[0] == "NAME"
@@ -939,9 +1001,9 @@ class Parser:
             self.next()
             name = self.peek()[1]
             s = self.simple(newline=True)
-            if s[0] != "assign":
+            if s[0] not in ("assign", "assign_fold"):
                 raise MuError(f"line {t[2]}: a ret line takes one plain assignment")
-            return ("assign", *s[1:], name)
+            return (s[0], *s[1:], name)
         return self.simple(newline=True)
 
     def with_stmt(self):
@@ -1055,6 +1117,12 @@ class Parser:
                 s = ("annassign", lhs, t, val)
             elif self.peek()[1] in AUGMENTED and self.peek()[0] == "OP":
                 op = self.next()[1]
+                if op == "=" and self.fold_block_ahead():
+                    # `res = count for x in xs` then a block: the fold's value
+                    head = self.fold(allow_block=True)
+                    self.known[-1] |= set(NAME.findall(head[2])) | targets(lhs)
+                    body = self.lifted(self.block(), head[2])
+                    return ("assign_fold", lhs, op, head, body)
                 rhs = (
                     self.arg()
                     if op == "=" and self.lambda_ahead()
@@ -1089,6 +1157,35 @@ class Parser:
         if newline or self.peek()[0] == "NEWLINE":
             self.expect_kind("NEWLINE")
         return s
+
+    def fold_block_ahead(self):
+        """Whether a fold with a block starts here: `sum for ...` or `sum
+        from ...` with no `:` on the line, and a block under it."""
+        t = self.peek()
+        if not (t[0] == "NAME" and t[1] in FOLDS and (self.at("for", 1) or self.at("from", 1))):
+            return False
+        j, depth = self.i + 1, 0
+        while self.toks[j][0] not in ("NEWLINE", "EOF"):
+            val = self.toks[j][1]
+            depth += val in "([{"
+            depth -= val in ")]}"
+            if depth == 0 and val == ":":
+                return False
+            j += 1
+        return self.toks[j + 1][0] == "INDENT"
+
+    def lifted(self, body, tgt):
+        """body, less the block lambdas in it that read nothing the fold's
+        block binds: those go to pending, to be built once before the fold.
+        One that reads a name the block sets per item stays, built per item."""
+        held = bound(body) | set(NAME.findall(tgt))
+        kept = []
+        for s in body:
+            if isinstance(s, Hoisted) and not (s.reads - {s[1]}) & held:
+                self.pending.append(s)
+            else:
+                kept.append(s)
+        return kept
 
     def stages(self, sides, rhs, line):
         """`a * b = pair`: a side of `=` that is a value, not a target. Each
@@ -1615,9 +1712,10 @@ class Parser:
         method = self.toks[self.i - 1][0] == "NAME" and self.toks[self.i - 2][1] == "."
         named = kind == "NAME" or kind == "STR" and method
         if named and self.operand_next():
+            mark = len(self.pending)
             arg = self.postfix(nested=True)
             if self.at("for") and (arg.call or not nested):
-                arg = Py(f"{arg}{self.comprehension()}")
+                arg = Py(f"{arg}{self.comprehension(mark)}")
             out = self.special(e, [arg], [])
             out.call = True
             return out
@@ -1732,6 +1830,12 @@ class Parser:
                 return self.first()
             if val in KEYWORDS:
                 raise MuError(f"line {t[2]}: unexpected {val!r}")
+            if val == "mu":
+                # the block lambda around it, by its hidden name
+                if not self.mu:
+                    raise MuError(f"line {t[2]}: mu names the block lambda around it; here there is none")
+                self.next()
+                return Py(self.mu[-1])
             self.next()
             if val == "inf":
                 self.need("from math import inf")
@@ -1743,9 +1847,10 @@ class Parser:
             if self.at(")"):
                 self.next()
                 return Py("()")
+            mark = len(self.pending)
             parts = [self.pushed(self.item("("))]  # (*e, 1): a starred item
             if self.at("for"):  # a generator: (e for x in xs)
-                gen = self.comprehension()
+                gen = self.comprehension(mark)
                 self.expect(")")
                 return Py(f"({parts[0]}{gen})")
             one = False  # (x,) is a one-element tuple
@@ -1760,8 +1865,76 @@ class Parser:
         if val == "[":
             return self.collection("[", "]")
         if val == "{":
+            if self.block_lambda_ahead():
+                return self.block_lambda()
             return self.collection("{", "}")
         raise MuError(f"line {t[2]}: unexpected {val or kind!r}")
+
+    def block_lambda_ahead(self):
+        """Whether `{` starts a block lambda: `{->`, `{x ->` or `{(a, b) ->`,
+        the head on this line or on the line under the `{`."""
+        j = self.i + 1
+        if self.toks[j][0] == "NEWLINE" and self.toks[j + 1][0] == "INDENT":
+            j += 2
+        if self.toks[j][1] == "->":
+            return True
+        if self.toks[j][0] == "NAME" and self.toks[j + 1][1] == "->":
+            return True
+        if self.toks[j][1] != "(":
+            return False
+        j += 1
+        while self.toks[j][0] == "NAME" or self.toks[j][1] == ",":
+            j += 1
+        return self.toks[j][1] == ")" and self.toks[j + 1][1] == "->"
+
+    def block_lambda(self):
+        """`{p -> body}`: a function with no name of its own. The body is
+        an expression on the line, or a block under the `->` closed by a
+        `}` at the indent of the line that opened it; its last line is the
+        value. Inside, `mu` is the function. It compiles to a def with a
+        hidden name, placed before the statement that holds it, so a block
+        in a one-line fold is built once and one in a fold's block once per
+        item, where its names are bound."""
+        line = self.expect("{")[2]
+        deep = self.peek()[0] == "NEWLINE"  # the head on its own line
+        if deep:
+            self.next()
+            self.expect_kind("INDENT")
+        names = []
+        if self.at("("):
+            self.next()
+            while not self.at(")"):
+                names.append(self.expect_kind("NAME"))
+                if not self.at(")"):
+                    self.expect(",")
+            self.expect(")")
+        elif self.peek()[0] == "NAME":
+            names.append(self.next()[1])
+        self.expect("->")
+        self.hoisted += 1
+        name = Py(f"_mu{self.hoisted}")
+        name.hidden = True
+        self.mu.append(name)
+        self.known.append(set(names))
+        if self.peek()[0] == "NEWLINE":
+            self.next()
+            self.expect_kind("INDENT")
+            body = []
+            while self.peek()[0] != "DEDENT":
+                body += flat(self.stmt())
+            self.next()
+        else:
+            body = [("expr", self.body())]
+        if deep:
+            self.expect_kind("DEDENT")
+        self.known.pop()
+        self.mu.pop()
+        self.expect("}")
+        d = Hoisted(("def", name, [(Py(n), None) for n in names], None, body))
+        d.reads = reads_of(d)
+        self.at_line[id(d)] = line
+        self.pending.append(d)
+        return Py(name)
 
     def collection(self, open_, close):
         self.expect(open_)
@@ -1776,9 +1949,10 @@ class Parser:
                 self.next()
                 return Py(f"defaultdict({default})")
             return self.collected(default, close)
+        mark = len(self.pending)
         first = self.pushed(self.item(open_))
         if self.at("for"):
-            gen = self.comprehension()
+            gen = self.comprehension(mark)
             self.expect(close)
             out = Py(f"{open_}{first}{gen}{close}")
             return self.rec(out) if first.pair else out
@@ -1817,6 +1991,7 @@ class Parser:
         item, and is the dict. The operator is a push or an augmented
         assignment: {:int: k += 1 for ...}."""
         self.expect(":")
+        mark = len(self.pending)
         key = self.expr()
         kind, op, line = self.next()[:3]
         if op != "<-" and (kind != "OP" or op not in IN_PLACE):
@@ -1826,7 +2001,7 @@ class Parser:
         val = self.expr()
         if not self.at("for"):
             raise MuError(f"line {line}: expected 'for' after {key} {op} {val}")
-        pairs = f"(({key}, {val}){self.comprehension()})"
+        pairs = f"(({key}, {val}){self.comprehension(mark)})"
         self.expect(close)
         d = f"defaultdict({default})"
         if op == "<-":
@@ -1847,17 +2022,23 @@ class Parser:
             raise MuError(f"line {line}: a push in brackets needs a for")
         return e
 
-    def comprehension(self):
-        """One or more `for target in iter [if cond]` clauses."""
-        out = ""
+    def comprehension(self, mark=None):
+        """One or more `for target in iter [if cond]` clauses. mark: where
+        the pending defs stood before the element was parsed, so a block
+        lambda in it that reads a target is refused."""
+        out, tgts = "", []
+        line = self.peek()[2]
         while self.at("for"):
             self.next()
             tgt, wrap = self.target()
+            tgts.append(tgt)
             self.expect("in")
             out += f" for {tgt} in {iterable(self.or_(), wrap)}"
             while self.at("if"):
                 self.next()
                 out += f" if {self.or_()}"
+        if mark is not None:
+            self.hoisted_reads(mark, ", ".join(tgts), line)
         return out
 
     def call(self, fn):
@@ -1937,9 +2118,10 @@ class Parser:
                 # (a, b) -> e takes a and b, or one pair it unpacks
                 inner = f"(lambda {', '.join(names)}: {self.body()})"
                 return Py(f"lambda *_a: {inner}(*(_a[0] if len(_a) == 1 else _a))")
+        mark = len(self.pending)
         e = self.expr()
         if self.at("for"):
-            return Py(f"{e}{self.comprehension()}")
+            return Py(f"{e}{self.comprehension(mark)}")
         return e
 
     def special(self, fn, args, kwargs):
@@ -1994,6 +2176,7 @@ class Parser:
     def fold(self, allow_block=False):
         """sum|max|min|count [from e] for [target in] iter [if cond] (: body | block).
         With no `target in`, the item is `_`."""
+        line = self.peek()[2]
         op = self.next()[1]
         start = None
         if self.at("from"):
@@ -2006,7 +2189,7 @@ class Parser:
             it = iterable(self.or_(), wrap)
         else:
             tgt, it = "_", self.or_()
-        where = None
+        where, mark = None, len(self.pending)
         if self.at("if"):
             self.next()
             where = self.or_()
@@ -2024,6 +2207,7 @@ class Parser:
         if self.at(":"):
             self.next()
             body = self.expr()
+        self.hoisted_reads(mark, tgt, line)
         cond = f" if {where}" if where else ""
         # a list, not a generator: sum, max and min are C functions, and a
         # generator they pull from puts every level of a memo's recursion
@@ -2042,18 +2226,53 @@ class Parser:
             return Py(f"{op}({gen})")
         return Py(f"{op}({start}, {op}({gen}, default={start}))")
 
-    def first(self):
-        """first k in lo..hi if pred: the least k with pred true (pred monotone)."""
-        self.expect("first")
+    def first_block_ahead(self):
+        """Whether `first k in lo..hi` with no `if` ends the line and a block
+        follows: the block form, its last line the test."""
+        if not (self.at("first") and self.peek(1)[0] == "NAME" and self.at("in", 2)):
+            return False
+        j, depth = self.i + 3, 0
+        while self.toks[j][0] not in ("NEWLINE", "EOF"):
+            kind, val = self.toks[j][:2]
+            depth += val in "([{"
+            depth -= val in ")]}"
+            if depth == 0 and (kind, val) == ("NAME", "if"):
+                return False
+            j += 1
+        return self.toks[j + 1][0] == "INDENT"
+
+    def first(self, block=False):
+        """first k in lo..hi if pred: the least k with pred true (pred
+        monotone). With block, the test may be a block under the line, its
+        last line the value, compiled to a def with a hidden name."""
+        line = self.expect("first")[2]
         k = self.expect_kind("NAME")
         self.expect("in")
         rng = self.range_()
         if not rng.rng:
             raise MuError(f"line {self.peek()[2]}: first needs a range lo..hi")
-        self.expect("if")
-        pred = self.expr()
         self.need("from bisect import bisect_left")
         lo = rng.rng[0]
+        if block and self.peek()[0] == "NEWLINE" and self.peek(1)[0] == "INDENT":
+            self.next()
+            self.next()
+            self.hoisted += 1
+            name = Py(f"_first{self.hoisted}")
+            name.hidden = True
+            self.known.append({k})
+            body = []
+            while self.peek()[0] != "DEDENT":
+                body += flat(self.stmt())
+            self.next()
+            self.known.pop()
+            if not body or body[-1][0] != "expr":
+                raise MuError(f"line {line}: the last line of a first block must be the test")
+            d = Hoisted(("def", name, [(Py(k), None)], None, body))
+            self.at_line[id(d)] = line
+            self.pending.append(d)
+            return Py(f"{lo} + bisect_left({rng}, True, key={name})")
+        self.expect("if")
+        pred = self.expr()
         return Py(f"{lo} + bisect_left({rng}, True, key=lambda {k}: {pred})")
 
 
@@ -2180,6 +2399,34 @@ def free_names(side):
     return list(dict.fromkeys(name for _, _, name in sorted(found)))
 
 
+def reads_of(stmt):
+    """The names a def reads from outside itself, its nested defs included:
+    what Python's symbol table marks free or global in it. Empty when the
+    def does not compile, which the transpile then reports on its own."""
+    e = Emitter()
+    e.stmt(stmt, 0, False)
+    try:
+        table = symtable.symtable("\n".join(e.lines), "<mu>", "exec").get_children()[0]
+    except SyntaxError:
+        return frozenset()
+    out = set()
+
+    def walk(t, bound):
+        own = {
+            s.get_name()
+            for s in t.get_symbols()
+            if s.is_assigned() or s.is_parameter() or s.is_imported()
+        }
+        for s in t.get_symbols():
+            if s.is_referenced() and s.get_name() not in own | bound:
+                out.add(s.get_name())
+        for c in t.get_children():
+            walk(c, bound | own)
+
+    walk(table, frozenset())
+    return frozenset(out)
+
+
 def imported(line):
     """The names an import line binds."""
     names = line.split(" import ")[-1] if line.startswith("from ") else line[7:]
@@ -2215,7 +2462,7 @@ def assigned(stmts):
     """Plain names a block assigns with = or op=, not inside nested defs."""
     out = set()
     for s in stmts:
-        if s[0] in ("assign", "annassign"):
+        if s[0] in ("assign", "annassign", "assign_fold"):
             out |= targets(s[1])
         for body in children(s):
             out |= assigned(body)
@@ -2229,6 +2476,8 @@ def bound(stmts, params=False):
     for s in stmts:
         if s[0] in ("assign", "annassign"):
             out |= targets(s[1])
+        elif s[0] == "assign_fold":
+            out |= targets(s[1]) | set(NAME.findall(s[3][2]))
         elif s[0] == "with":
             out |= {n for m in re.findall(r" as ([^,]+)", s[1]) for n in NAME.findall(m)}
         elif s[0] in ("def", "memo", "class"):
@@ -2252,8 +2501,8 @@ def is_memo(s):
 def ret_name(stmts):
     """The name a `ret` line of this block declares, or None."""
     for s in stmts:
-        if s[0] == "assign" and len(s) == 5:
-            return s[4]
+        if s[0] == "assign" and len(s) == 5 or s[0] == "assign_fold" and len(s) == 6:
+            return s[-1]
     return None
 
 
@@ -2272,6 +2521,8 @@ def children(s):
         return [b for _, b in s[1]] + ([s[2]] if s[2] else [])
     if s[0] == "foldblock":
         return [s[6]]
+    if s[0] == "assign_fold":
+        return [s[4]]
     if s[0] == "with":
         return [s[2]]
     if s[0] == "try":
@@ -2400,6 +2651,9 @@ class Emitter:
             self.out(ind, last.format(s[1]))
         elif kind == "foldblock":
             self.foldblock(s, ind, last)
+        elif kind == "assign_fold":
+            _, lhs, op, head, body = s[:5]
+            self.foldblock(("foldblock", *head, body), ind, f"{lhs} {op} {{}}")
 
     def try_(self, s, ind, last):
         """A try returns the last line of its handlers and its else; of its
@@ -2453,7 +2707,8 @@ class Emitter:
         marks = {d for _, d in getattr(s, "decorators", ())}
         first = "cls" if "classmethod" in marks else "self"
         # a staticmethod takes no object, a classmethod takes the class
-        sig = [first] * (self.method and top and "staticmethod" not in marks)
+        hidden = getattr(name, "hidden", False)  # a block lambda's def
+        sig = [first] * (self.method and top and not hidden and "staticmethod" not in marks)
         sig += [param(p, t) for p, t in params]
         arrow = f" -> {ret}" if ret else ""
         self.decorators(s, ind)
@@ -2945,6 +3200,7 @@ def fmt(src):
     fmt(fmt(s)) == fmt(s)."""
     lines, indents, buf, depth, blank, level = [], [0], [], 0, False, 0
     in_class = False  # the current top-level block is a class
+    stack = []  # each open bracket; "B" for a brace that opens a block
     rows, k = src.splitlines(), -1
     while k + 1 < len(rows):
         k += 1
@@ -2986,8 +3242,15 @@ def fmt(src):
             if m.lastgroup == "ws":
                 continue
             val = m.group()
-            if m.lastgroup == "op":
-                depth += (val in "([{") - (val in ")]}")
+            if m.lastgroup == "op" and val in "([{":
+                if val == "{" and opens_block(line, pos, rows, k):
+                    stack.append("B")  # `{p ->` opens a block: its lines stay
+                else:
+                    depth += 1
+                    stack.append(val)
+            elif m.lastgroup == "op" and val in ")]}":
+                if not (stack and stack.pop() == "B"):
+                    depth -= 1
             if m.lastgroup == "name" and buf and buf[-1][0] == "NUM" and glue == m.start():
                 buf[-1] = ("NUM", buf[-1][1] + val)  # `2x` stays one token
                 continue

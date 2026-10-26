@@ -58,7 +58,7 @@ KEYWORDS = sorted(
     {"def", "memo", "for", "in", "if", "elif", "else", "while", "return", "ret"}
     | {"break", "continue", "pass", "del", "assert", "yield", "from", "import"}
     | {"extends", "and", "or", "not", "is", "true", "false", "none", "inf"}
-    | {"first", "sum", "max", "min", "count", "lambda"}
+    | {"first", "sum", "max", "min", "count", "lambda", "mu"}
     | {"with", "as", "try", "except", "finally", "raise", "global", "nonlocal"}
     | {"async", "await"}
 )
