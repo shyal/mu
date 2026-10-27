@@ -6,7 +6,7 @@ mu is a small language that transpiles to Python. A file is indented
 blocks without colons, calls of one argument without brackets, `..`
 ranges, `x -> ...` lambdas, `{x -> ...}` block lambdas that recurse as
 `mu`, `<-` push, folds (`sum for x in xs: f(x)`),
-`memo` for a cached function with cases, and `class` for a Python class.
+`memo` for a cached function with cases or a cached block lambda, and `class` for a Python class.
 The Python it produces is plain and runs anywhere; the transpiler pastes
 in the source of every helper the file calls.
 
@@ -1207,7 +1207,7 @@ class Solution:
 
 ## Spec
 
-The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md).
+The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md), [v0.14](spec/v0.14.md).
 
 ## Profiles
 

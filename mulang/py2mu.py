@@ -487,6 +487,17 @@ class Printer:
             func, kwargs = "sort", {
                 "by" if k == "key" else k: v for k, v in kwargs.items()
             }
+        elif (
+            name == "list"
+            and len(node.args) == 1
+            and not kwargs
+            and isinstance(node.args[0], ast.Call)
+            and ast.unparse(node.args[0].func) == "filter"
+            and len(node.args[0].args) == 2
+            and not node.args[0].keywords
+        ):
+            f, xs = node.args[0].args
+            return f"filter({self.arg(xs)}, by={self.arg(f)})", POSTFIX
         elif name == "Counter":
             func = "counter"
         elif name == "defaultdict" and len(node.args) == 1 and not kwargs:
@@ -925,7 +936,7 @@ def unshadow(fn, scopes=(), shared=frozenset()):
 def mu_calls():
     """Names mu gives a meaning when called."""
     return {h for h in HELPERS if not h.startswith("_")} | {
-        "sort", "scan", "counter", "ceil", "floor", "deep", "Grid"
+        "sort", "filter", "scan", "counter", "ceil", "floor", "deep", "Grid"
     }  # fmt: skip
 
 

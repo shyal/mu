@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.13"
+VERSION = "0.14"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that end a call written without brackets
@@ -1336,6 +1336,14 @@ class Parser:
             return ("memo", name, params, cases)
         self.expect_kind("NEWLINE")
         self.expect_kind("INDENT")
+        cases = self.cases()
+        self.expect_kind("DEDENT")
+        return ("memo", name, params, cases)
+
+    def cases(self):
+        """`| guard -> value` lines, one case each; `| else ->` matches
+        everything. (guard, value) for each, the guard None for else."""
+        cases = []
         while self.at("|"):
             self.next()
             guard = None
@@ -1346,8 +1354,18 @@ class Parser:
             self.expect("->")
             cases.append((guard, self.expr()))
             self.expect_kind("NEWLINE")
-        self.expect_kind("DEDENT")
-        return ("memo", name, params, cases)
+        return cases
+
+    def cases_body(self, cases):
+        """A case list as the body of a def: each guarded case returns its
+        value when the guard holds, an else case is the value."""
+        body = []
+        for guard, val in cases:
+            if guard is None:
+                body.append(("expr", val))
+                break
+            body.append(("if", [(guard, [("return", val)])], None))
+        return body
 
     def type(self):
         """[T] list, {K: V} dict, {T} set, (A, B) tuple, T? optional,
@@ -1830,6 +1848,14 @@ class Parser:
                 return self.first()
             if val in KEYWORDS:
                 raise MuError(f"line {t[2]}: unexpected {val!r}")
+            if val == "memo":
+                # `memo {n -> ...}`: a block lambda whose def is cached
+                self.next()
+                if not (self.at("{") and self.block_lambda_ahead()):
+                    raise MuError(
+                        f"line {t[2]}: memo goes before a name or a block `{{n ->`"
+                    )
+                return self.block_lambda(memo=True)
             if val == "mu":
                 # the block lambda around it, by its hidden name
                 if not self.mu:
@@ -1887,15 +1913,21 @@ class Parser:
             j += 1
         return self.toks[j][1] == ")" and self.toks[j + 1][1] == "->"
 
-    def block_lambda(self):
+    def block_lambda(self, memo=False):
         """`{p -> body}`: a function with no name of its own. The body is
         an expression on the line, or a block under the `->` closed by a
         `}` at the indent of the line that opened it; its last line is the
         value. Inside, `mu` is the function. It compiles to a def with a
         hidden name, placed before the statement that holds it, so a block
         in a one-line fold is built once and one in a fold's block once per
-        item, where its names are bound."""
+        item, where its names are bound. With memo, `memo {n ->`, the def is
+        cached, as a `memo` statement is, and runs on the deep stack."""
         line = self.expect("{")[2]
+        if memo:
+            self.memo_used = True
+            self.need(helper="cache")
+            self.need("import sys")
+            self.need(helper="deep")
         deep = self.peek()[0] == "NEWLINE"  # the head on its own line
         if deep:
             self.next()
@@ -1920,6 +1952,13 @@ class Parser:
             self.next()
             self.expect_kind("INDENT")
             body = []
+            if self.at("|"):  # a case list, as a memo's
+                body = self.cases_body(self.cases())
+                if self.peek()[0] != "DEDENT":
+                    t = self.peek()
+                    raise MuError(
+                        f"line {t[2]}: a case list is the whole body of the block"
+                    )
             while self.peek()[0] != "DEDENT":
                 body += flat(self.stmt())
             self.next()
@@ -1930,7 +1969,8 @@ class Parser:
         self.known.pop()
         self.mu.pop()
         self.expect("}")
-        d = Hoisted(("def", name, [(Py(n), None) for n in names], None, body))
+        d = ("def", name, [(Py(n), None) for n in names], None, body)
+        d = Hoisted(d + (("memo",) if memo else ()))
         d.reads = reads_of(d)
         self.at_line[id(d)] = line
         self.pending.append(d)
@@ -2139,6 +2179,9 @@ class Parser:
             if "by" in kw:
                 kw["key"] = kw.pop("by")
             fn = "sorted"
+        if fn == "filter" and "by" in kw and len(args) == 1:
+            # filter(xs, by=f): the items f holds for, as a list
+            return Py(f"list(filter({kw['by']}, {args[0]}))")
         if fn == "scan":
             self.need("from itertools import accumulate")
             op, xs = args

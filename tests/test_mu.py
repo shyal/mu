@@ -678,6 +678,19 @@ def test_a_helper_passed_by_name_is_pasted():
     assert "def even(n):" not in out and "def odd(n):" not in out
 
 
+def test_filter_by_is_the_items_the_predicate_holds_for():
+    src = "def f(n: int) -> [int]\n  filter(0..n-1, by=odd)\n"
+    out = transpile(src)
+    assert "return list(filter(odd, range(0, n - 1 + 1)))" in out
+    assert "def odd(n):" in out
+    assert run(src, 10) == [1, 3, 5, 7, 9]
+    src = "def f(xs: [int]) -> [int]\n  filter(xs, by=x -> x > 2)\n"
+    assert run(src, [1, 2, 3, 4]) == [3, 4]
+    # Python's own filter, positional, is left alone
+    plain = "def f(xs: [int]) -> [int]\n  filter(odd, xs)\n"
+    assert "return filter(odd, xs)" in transpile(plain)
+
+
 def test_scan_reverse_folds_from_the_right():
     """`scan(max, xs, reverse=True)` is the running max of every suffix."""
     src = "def f(xs: [int]) -> [int]\n  scan(max, xs, reverse=True)\n"
@@ -1524,9 +1537,76 @@ def test_a_block_lambda_in_a_fold_block_is_built_once_per_item():
         ),
         ("def f(xs: [int]) -> [int]\n  [{y -> x + y}(1) for x in xs]\n", "reads x from the loop"),
         ("def f(x: int) -> int\n  mu(x)\n", "line 2: mu names the block lambda around it"),
+        (
+            "def f(n: int) -> int\n  {k ->\n    | k < 2 -> k\n    x = 1\n  }(n)\n",
+            "line 4: a case list is the whole body of the block",
+        ),
     ],
 )
 def test_block_lambda_errors(src, message):
+    with pytest.raises(MuError, match=re.escape(message)):
+        transpile(src)
+
+
+def test_memo_before_a_block_lambda_caches_its_def_on_the_deep_stack():
+    src = (
+        "def longest(G: {int: [int]}) -> int\n"
+        "  memo {\n"
+        "    n ->\n"
+        "      max from 0 for v in G[n]: 1 + mu(v)\n"
+        "  }(0)\n"
+    )
+    out = transpile(src)
+    assert "    def run():\n        @cache\n        def _mu1(n):\n" in out
+    assert "    return deep(run)\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    chain = {i: [i + 1] for i in range(20000)} | {20000: []}
+    assert ns["longest"](chain) == 20000
+    assert fmt(src) == src
+
+
+def test_a_block_lambda_may_take_a_case_list_as_its_body():
+    src = (
+        "def longest(G: {int: [int]}) -> int\n"
+        "  memo {n ->\n"
+        "    | not G[n] -> 0\n"
+        "    | else     -> max for v in G[n]: 1 + mu(v)\n"
+        "  }(0)\n"
+    )
+    out = transpile(src)
+    assert "def _mu1(n):\n            if not G[n]:\n                return 0\n" in out
+    assert "            return max([1 + _mu1(v) for v in G[n]])\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["longest"]({0: [1, 2], 1: [2], 2: []}) == 2
+    assert fmt(src) == src
+    plain = (
+        "def fib(n: int) -> int\n"
+        "  {k ->\n"
+        "    | k < 2 -> k\n"
+        "    | else  -> mu(k - 1) + mu(k - 2)\n"
+        "  }(n)\n"
+    )
+    ns = {}
+    exec(transpile(plain), ns)
+    assert ns["fib"](20) == 6765
+    assert fmt(plain) == plain
+
+
+def test_memo_before_a_one_line_block_lambda():
+    src = "def fib(n: int) -> int\n  memo {k -> k < 2 ? k : mu(k - 1) + mu(k - 2)}(n)\n"
+    out = transpile(src)
+    assert "@cache\n        def _mu1(k):" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["fib"](90) == 2880067194370816120
+    assert fmt(src) == src
+
+
+def test_memo_before_anything_but_a_name_or_a_block_lambda_is_refused():
+    src = "def f(n: int) -> int\n  memo (k -> k)(n)\n"
+    message = "line 2: memo goes before a name or a block `{n ->`"
     with pytest.raises(MuError, match=re.escape(message)):
         transpile(src)
 

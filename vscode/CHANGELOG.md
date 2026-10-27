@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+mu 0.14: `memo` before a `{` block lambda is coloured as the modifier.
+
 ## 0.5.0
 
 mu 0.13: `mu`, the name of the block lambda around it, is coloured as
