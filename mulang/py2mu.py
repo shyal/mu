@@ -78,6 +78,27 @@ def call_name(node):
     return ast.unparse(node.func) if isinstance(node, ast.Call) else None
 
 
+KEYED = ("sorted", "max", "min", "nlargest", "nsmallest", "groupby")
+
+
+def indexed_by(key):
+    """`values.__getitem__`, `lambda i: values[i]` and `_by(values)` are
+    `by=values` in mu; any other key is itself."""
+    if isinstance(key, ast.Attribute) and key.attr == "__getitem__":
+        return key.value
+    if (
+        isinstance(key, ast.Lambda)
+        and len(key.args.args) == 1
+        and isinstance(key.body, ast.Subscript)
+        and isinstance(key.body.slice, ast.Name)
+        and key.body.slice.id == key.args.args[0].arg
+    ):
+        return key.body.value
+    if isinstance(key, ast.Call) and call_name(key) == "_by" and len(key.args) == 1:
+        return key.args[0]
+    return key
+
+
 def is_const(node, value):
     """True for the literal `value`; a negative one is written -1, which the
     parser reads as the negation of 1."""
@@ -133,8 +154,10 @@ class Canon(ast.NodeTransformer):
     """What the comparison ignores: load or store, keyword order, the
     wrapper that lets mu's (a, b) -> e also take one pair, the 0 that
     visit_Call puts in front of range(n), which `for >i in xs` writes
-    back as range(len(xs)), and the list a fold hands to sum, max or min
-    where the Python passed a generator."""
+    back as range(len(xs)), the list a fold hands to sum, max or min
+    where the Python passed a generator, and the three spellings of a key
+    that indexes (`_by(xs)`, `xs.__getitem__`, `lambda i: xs[i]`), which
+    mu writes as `by=xs`."""
 
     @staticmethod
     def pair_lambda(node):
@@ -201,6 +224,10 @@ class Canon(ast.NodeTransformer):
                     else a
                     for a in node.args
                 ]
+            if call_name(node) in KEYED:
+                for k in node.keywords:
+                    if k.arg == "key":
+                        k.value = indexed_by(k.value)
         return node
 
 
@@ -483,9 +510,12 @@ class Printer:
             return rng, RANGE
         func = self.expr(node.func, POSTFIX)
         kwargs = {k.arg: k.value for k in node.keywords}
-        if name == "sorted" and "key" in kwargs:
-            func, kwargs = "sort", {
-                "by" if k == "key" else k: v for k, v in kwargs.items()
+        if name in KEYED and "key" in kwargs:
+            if name == "sorted":
+                func = "sort"
+            kwargs = {
+                "by" if k == "key" else k: indexed_by(v) if k == "key" else v
+                for k, v in kwargs.items()
             }
         elif name == "Counter":
             func = "counter"

@@ -411,6 +411,15 @@ def test_a_loop_that_names_no_variable_reads_the_item_as_underscore():
     assert fmt(src) == src
 
 
+def test_sum_from_is_the_start_value_so_non_numbers_add_up():
+    src = "def f(rows: [[int]]) -> Counter\n  sum from Counter() for row in rows: Counter(row)\n"
+    out = transpile(src)
+    assert "sum([Counter(row) for row in rows], Counter())" in out
+    ns = {"Counter": __import__("collections").Counter}
+    exec(out, ns)
+    assert ns["f"]([[1, 2], [2, 3]]) == {1: 1, 2: 2, 3: 1}
+
+
 @pytest.mark.parametrize(
     "body, want",
     [
@@ -1593,3 +1602,54 @@ def test_a_block_lambda_reading_a_name_the_fold_block_binds_stays_in_the_loop():
     ns: dict = {}
     exec(out, ns)
     assert ns["reach"]({0: [1], 1: [2], 2: []}) == 3
+
+
+def test_by_indexes_a_list_a_dict_or_a_string():
+    """`by=` on max, min and sort is Python's key=. A lambda or a known
+    function is the key as it is; a parameter or a local goes through
+    `_by`, which at run time indexes anything that is not a function."""
+    src = (
+        "def f(a: int, b: int, values: str) -> int\n"
+        "  max(a, b, by=values)\n"
+        "def g(xs: [int], d: {int: int}) -> int\n"
+        "  min(xs, by=d)\n"
+        "def h(xs: [int], w: [int]) -> [int]\n"
+        "  sort(xs, by=w)\n"
+        "def k(xs: [int]) -> [int]\n"
+        "  sort(xs, by=x -> -x)\n"
+        "def m(ws: [str]) -> [str]\n"
+        "  sort(ws, by=len)\n"
+        "def p(ds: [int]) -> [int]\n"
+        "  sort(ds, by=even)\n"
+    )
+    out = transpile(src)
+    assert "max(a, b, key=_by(values))" in out
+    assert "min(xs, key=_by(d))" in out
+    assert "sorted(xs, key=_by(w))" in out
+    assert "sorted(xs, key=lambda x: -x)" in out
+    assert "sorted(ws, key=len)" in out
+    assert "sorted(ds, key=even)" in out and "def even(n):" in out
+    assert out.count("def _by(key):") == 1
+    ns = {}
+    exec(out, ns)
+    assert ns["f"](0, 1, "BA") == 0 and ns["f"](0, 1, "AB") == 1
+    assert ns["g"]([0, 1, 2], {0: 5, 1: 2, 2: 7}) == 1
+    assert ns["h"]([0, 1, 2], [5, 2, 7]) == [1, 0, 2]
+    assert ns["k"]([1, 3, 2]) == [3, 2, 1]
+    assert ns["m"](["ccc", "a", "bb"]) == ["a", "bb", "ccc"]
+    assert ns["p"]([3, 2, 1]) == [3, 1, 2]  # even is False then True
+
+
+def test_by_on_a_local_function_still_calls_it():
+    """A local def passed as `by=` goes through `_by` too and is called."""
+    src = (
+        "def f(xs: [int]) -> [int]\n"
+        "  def neg(x)\n"
+        "    -x\n"
+        "  sort(xs, by=neg)\n"
+    )
+    out = transpile(src)
+    assert "sorted(xs, key=_by(neg))" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["f"]([1, 3, 2]) == [3, 2, 1]

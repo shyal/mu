@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.13"
+VERSION = "0.14"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that end a call written without brackets
@@ -348,6 +348,13 @@ RUNTIME = {
     return out[0]""",
         "Run fn on a thread with a 256 MB stack, so deep memo recursion fits.",
     ),
+    "_by": Helper(
+        (),
+        (),
+        """def _by(key):
+    return key if callable(key) else key.__getitem__""",
+        "A key for sort, max and min: a function as it is, anything else indexed.",
+    ),
     "_pushed": Helper(
         (),
         (),
@@ -375,6 +382,9 @@ RUNTIME = {
 }
 
 HELPERS = dict(RUNTIME)  # name -> Helper: RUNTIME plus the profile's library
+# the calls whose `by=` is Python's `key=`
+KEYED = ("sort", "max", "min", "nlargest", "nsmallest", "groupby")
+BUILTIN_NAMES = frozenset(dir(builtins))
 BUILTINS = {}  # name -> object: what the run time preloads, never pasted
 PATHS = []  # extra sys.path entries the profile's code lives under, for the ide
 DOCS = []  # markdown files whose ```python blocks document the library, for the ide
@@ -2124,6 +2134,24 @@ class Parser:
             return Py(f"{e}{self.comprehension(mark)}")
         return e
 
+    def key_of(self, by):
+        """The `key=` for a `by=`: a lambda, a block lambda, a call
+        (`cmp_to_key(...)`) or a known function name as it is; a name or an
+        attribute the transpiler cannot tell a function from goes through
+        `_by`, which at run time passes a function on and indexes anything
+        else, so `by=values` compares by the entries of values."""
+        if (
+            str(by).startswith("lambda")
+            or getattr(by, "hidden", False)
+            or str(by).endswith(")")
+            or by in HELPERS
+            or by in self.native
+            or by in BUILTIN_NAMES
+        ):
+            return by
+        self.need(helper="_by")
+        return Py(f"_by({by})")
+
     def special(self, fn, args, kwargs):
         kw = {k: v for k, v in kwargs}
         if fn == "dict":
@@ -2135,9 +2163,9 @@ class Parser:
         if fn == "floor" and len(args) == 1 and args[0].div:
             a, b = args[0].div
             return Py(f"({a}) // ({b})")
+        if fn in KEYED and "by" in kw:
+            kw["key"] = self.key_of(kw.pop("by"))
         if fn == "sort":
-            if "by" in kw:
-                kw["key"] = kw.pop("by")
             fn = "sorted"
         if fn == "scan":
             self.need("from itertools import accumulate")
@@ -2221,7 +2249,7 @@ class Parser:
             raise MuError(f"line {self.peek()[2]}: {op} for needs ': value' or a block")
         gen = f"[{body} for {tgt} in {it}{cond}]"
         if op == "sum":
-            return Py(f"({start} + sum({gen}))" if start else f"sum({gen})")
+            return Py(f"sum({gen}, {start})" if start else f"sum({gen})")
         if start is None:
             return Py(f"{op}({gen})")
         return Py(f"{op}({start}, {op}({gen}, default={start}))")

@@ -418,3 +418,31 @@ def test_parameter_defaults_translate():
     assert "def f(xs: [int], by=x -> x, reverse: bool=false) -> int" in got
     runs(got, "f([1, 2], reverse=True)", 2)
     runs(got, "f([1, 2], by=lambda n: n * 10)", 20)
+
+
+def test_key_by_a_getter_translates_to_by():
+    """`key=values.__getitem__`, `key=lambda i: values[i]` and `key=_by(values)`
+    are `by=values`; a key on max and min is `by=` like on sorted."""
+    got = mu_of(
+        "return max(a, b, key=values.__getitem__)",
+        sig="f(self, a: int, b: int, values: str) -> int",
+    )
+    assert "max(a, b, by=values)" in got
+    runs(got, 'f(0, 1, "BA")', 0)
+    got = mu_of(
+        "return min(xs, key=lambda i: d[i])",
+        sig="f(self, xs: List[int], d: Dict[int, int]) -> int",
+    )
+    assert "min(xs, by=d)" in got
+    runs(got, "f([0, 1, 2], {0: 5, 1: 2, 2: 7})", 1)
+    got = mu_of(
+        "return sorted(xs, key=_by(w))",
+        sig="f(self, xs: List[int], w: List[int]) -> List[int]",
+    )
+    assert "sort(xs, by=w)" in got
+    got = mu_of(
+        "return max(xs, key=lambda x: (x % 3, x))",
+        sig="f(self, xs: List[int]) -> int",
+    )
+    assert "max(xs, by=x -> (x % 3, x))" in got
+    runs(got, "f([1, 5, 9, 2])", 5)
