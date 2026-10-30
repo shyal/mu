@@ -60,7 +60,7 @@ KEYWORDS = sorted(
     | {"extends", "and", "or", "not", "is", "true", "false", "none", "inf"}
     | {"first", "sum", "max", "min", "count", "lambda", "mu"}
     | {"with", "as", "try", "except", "finally", "raise", "global", "nonlocal"}
-    | {"async", "await"}
+    | {"async", "await", "by"}
 )
 TRIES = 200
 

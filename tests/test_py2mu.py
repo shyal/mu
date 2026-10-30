@@ -373,6 +373,20 @@ def test_or_if_forms_translate_to_one_line(py):
     runs(mu_of(body), "f([[inf]])", -1)
 
 
+def test_a_stepped_range_translates_to_by():
+    sig = "f(self, n: int, s: int) -> List[int]"
+    body = (
+        "return [j for j in range(2, n, 3)] + list(range(n, -1, -s))"
+        " + list(range(0, n + 1, s)) + list(range(n, 0 - 1, -2))"
+    )
+    got = mu_of(body, sig)
+    assert "[j for j in 2..<n by 3]" in got
+    assert "n..<-1 by -s" in got
+    assert "0..<n + 1 by s" in got  # the sign of s is unknown: no inclusive form
+    assert "n..0 by -2" in got
+    runs(got, "f(10, 4)", [2, 5, 8, 10, 6, 2, 0, 4, 8, 10, 8, 6, 4, 2, 0])
+
+
 def test_list_of_filter_translates_to_filter_by():
     sig = "f(self, xs: List[int]) -> List[int]"
     got = mu_of("return list(filter(odd, xs))", sig)

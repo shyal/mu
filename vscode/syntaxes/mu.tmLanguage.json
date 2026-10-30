@@ -169,7 +169,7 @@
         },
         {
           "name": "keyword.other.mu",
-          "match": "\\b(from)\\b|\\bfirst\\b(?=\\s+[A-Za-z_]\\w*\\s+in\\b)"
+          "match": "\\b(from)\\b|\\bfirst\\b(?=\\s+[A-Za-z_]\\w*\\s+in\\b)|\\bby\\b(?!\\s*=)"
         },
         {
           "name": "keyword.operator.logical.mu",

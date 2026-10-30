@@ -35,7 +35,7 @@ NOT_ARGS = {"from", "in", "not", "and", "or", "if", "else", "is", "for", "while"
 NOT_ARGS |= {"elif", "def", "memo", "return", "del", "assert", "pass", "break"}
 NOT_ARGS |= {"continue", "import", "extends", "yield", "class"}
 NOT_ARGS |= {"as", "with", "try", "except", "finally", "raise", "global", "nonlocal"}
-NOT_ARGS |= {"async"}
+NOT_ARGS |= {"async", "by"}
 AUGMENTED = {
     "=",
     "+=",
@@ -1655,10 +1655,25 @@ class Parser:
             e.cmpparts = None if getattr(lhs, "cmpparts", None) else (lhs, op, rhs)
 
     def range_(self):
+        """`lo..hi` and `lo..<hi`, with `by s` the step. An inclusive end
+        moves one past hi the way the step goes: a literal step says which
+        way at compile time, any other step is tested at run time."""
         e = self.bitor()
         if (self.at("..") and not self.repeat_ahead()) or self.at("..<"):
             inclusive = self.next()[1] == ".."
             hi = self.bitor()
+            if self.at("by"):
+                self.next()
+                step = self.bitor()
+                if not inclusive:
+                    end = hi
+                elif re.fullmatch(r"\(?-?\d+\)?", str(step)):
+                    end = f"{hi} - 1" if "-" in str(step) else f"{hi} + 1"
+                else:
+                    end = f"{hi} + (1 if {step} > 0 else -1)"
+                r = Py(f"range({e}, {end}, {step})")
+                r.rng = (e, end, step)
+                return r
             end = f"{hi} + 1" if inclusive else hi
             r = Py(f"range({e}, {end})")
             r.rng = (e, end)
@@ -3131,7 +3146,7 @@ def render(toks, level=0):
             stack.pop()
             opened.pop()
         opens = prev is None or pk == "OP" and pv not in ")]}" or pv in STATEMENT_WORDS
-        opens = opens or pk == "TERN"
+        opens = opens or pk == "TERN" or (pk, pv) == ("NAME", "by")  # 0..n by -2
         unary = t[0] == "OP" and (
             t[1] in ("-", "~")
             and opens

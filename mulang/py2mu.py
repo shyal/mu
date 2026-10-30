@@ -608,19 +608,31 @@ class Printer:
         return f"first {k} in {lo}..<{hi} if {self.expr(fn.body, IFEXP)}"
 
     def range_(self, node, name):
-        """range(a, b + 1) is a..b, range(a, b) is a..<b."""
-        if name != "range" or len(node.args) != 2 or node.keywords:
+        """range(a, b + 1) is a..b, range(a, b) is a..<b, and a third
+        argument is `by s`: range(a, b - 1, -s) with a negative literal step
+        is a..b by -s."""
+        if name != "range" or len(node.args) not in (2, 3) or node.keywords:
             return None
-        lo, hi = node.args
+        lo, hi = node.args[:2]
+        step = node.args[2] if len(node.args) == 3 else None
+        by = f" by {self.expr(step, BOR)}" if step is not None else ""
+        # an inclusive end is written only for a step whose sign is known
+        literal = step is None or isinstance(step, ast.Constant)
+        down = False
+        if isinstance(step, ast.UnaryOp) and isinstance(step.op, ast.USub):
+            literal = down = isinstance(step.operand, ast.Constant)
+        elif isinstance(step, ast.Constant):
+            down = isinstance(step.value, int) and step.value < 0
         lo_text = self.expr(lo, BOR)
         if (
-            isinstance(hi, ast.BinOp)
-            and isinstance(hi.op, ast.Add)
+            literal
+            and isinstance(hi, ast.BinOp)
+            and isinstance(hi.op, ast.Sub if down else ast.Add)
             and is_const(hi.right, 1)
             and self.form(hi.left)[1] >= ARITH
         ):
-            return f"{lo_text}..{self.expr(hi.left, BOR)}"
-        return f"{lo_text}..<{self.expr(hi, BOR)}"
+            return f"{lo_text}..{self.expr(hi.left, BOR)}{by}"
+        return f"{lo_text}..<{self.expr(hi, BOR)}{by}"
 
     def loop_head(self, target, it):
         """`for i, x in enumerate(xs)` is `for >i, x in xs`; `for i in

@@ -80,6 +80,30 @@ def test_fmt_ranges_unary_and_joined_brackets():
     )
 
 
+def test_a_range_takes_a_step_with_by():
+    src = (
+        "def f(n: int, s: int) -> [[int]]\n"
+        "  a = [j for j in 2..<n by 3]\n"
+        "  b = [j for j in 0..n by 5]\n"
+        "  c = [j for j in n..0 by -3]\n"
+        "  d = [j for j in 0..n by s]\n"
+        "  e = [j for j in n..0 by -s]\n"
+        "  [a, b, c, d, e]\n"
+    )
+    out = transpile(src)
+    assert "range(2, n, 3)" in out and "range(0, n + 1, 5)" in out
+    # an inclusive end moves the way the step goes: a literal step at compile
+    # time, any other step at run time
+    assert "range(n, 0 - 1, -3)" in out
+    assert "range(0, n + (1 if s > 0 else -1), s)" in out
+    want = [[2, 5, 8], [0, 5, 10], [10, 7, 4, 1], [0, 4, 8], [10, 6, 2]]
+    assert run(src, 10, 4) == want
+    assert fmt(src) == src
+    assert fmt("def f(n: int) -> int\n  sum for j in 0 .. n by  - 2: j\n") == (
+        "def f(n: int) -> int\n  sum for j in 0..n by -2: j\n"
+    )
+
+
 def test_push_operator():
     src = "def f(a: [int], x: int) -> [int]\n  if x < -1: a <- -x\n  a <- x\n"
     out = transpile(src)
