@@ -124,7 +124,7 @@
       }
     },
     "memo": {
-      "match": "\\b(memo)\\s+([A-Za-z_]\\w*)",
+      "match": "\\b(memo)\\s+(?:([A-Za-z_]\\w*)|(?=\\{))",
       "captures": {
         "1": {
           "name": "storage.modifier.memo.mu"

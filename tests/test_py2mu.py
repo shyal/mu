@@ -373,6 +373,15 @@ def test_or_if_forms_translate_to_one_line(py):
     runs(mu_of(body), "f([[inf]])", -1)
 
 
+def test_list_of_filter_translates_to_filter_by():
+    sig = "f(self, xs: List[int]) -> List[int]"
+    got = mu_of("return list(filter(odd, xs))", sig)
+    assert "    filter(xs, by=odd)\n" in got
+    got = mu_of("return list(filter(lambda x: x > 2, xs))", sig)
+    assert "    filter(xs, by=x -> x > 2)\n" in got
+    runs(got, "f([1, 2, 3, 4])", [3, 4])
+
+
 def test_decorators_and_yields_translate():
     got = mu_of(
         """

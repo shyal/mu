@@ -6,7 +6,7 @@ mu is a small language that transpiles to Python. A file is indented
 blocks without colons, calls of one argument without brackets, `..`
 ranges, `x -> ...` lambdas, `{x -> ...}` block lambdas that recurse as
 `mu`, `<-` push, folds (`sum for x in xs: f(x)`),
-`memo` for a cached function with cases, and `class` for a Python class.
+`memo` for a cached function with cases or a cached block lambda, and `class` for a Python class.
 The Python it produces is plain and runs anywhere; the transpiler pastes
 in the source of every helper the file calls.
 
