@@ -711,6 +711,21 @@ def test_a_helper_passed_by_name_is_pasted():
     assert "def even(n):" not in out and "def odd(n):" not in out
 
 
+def test_by_on_a_bound_name_indexes_even_when_a_helper_has_that_name():
+    # the file's `primes` is a list, not pydsa's sieve
+    src = (
+        "def f(n: int) -> [int]\n"
+        "  primes = [1] * n\n"
+        "  primes[0] = 0\n"
+        "  filter(0..<n, by=primes)\n"
+    )
+    out = transpile(src)
+    assert "list(filter(_by(primes), range(0, n)))" in out
+    assert run(src, 4) == [1, 2, 3]
+    src = "def f(xs: [int], max: [int]) -> int\n  sort(xs, by=max)[0]\n"
+    assert run(src, [1, 0], [5, 3]) == 1
+
+
 def test_filter_by_is_the_items_the_predicate_holds_for():
     src = "def f(n: int) -> [int]\n  filter(0..n-1, by=odd)\n"
     out = transpile(src)

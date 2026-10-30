@@ -2194,14 +2194,16 @@ class Parser:
         (`cmp_to_key(...)`) or a known function name as it is; a name or an
         attribute the transpiler cannot tell a function from goes through
         `_by`, which at run time passes a function on and indexes anything
-        else, so `by=values` compares by the entries of values."""
+        else, so `by=values` compares by the entries of values. A name the
+        file binds is the file's, a helper or builtin of the same name
+        notwithstanding."""
+        bound = any(str(by) in names for names in self.known)
         if (
             str(by).startswith("lambda")
             or getattr(by, "hidden", False)
             or str(by).endswith(")")
-            or by in HELPERS
-            or by in self.native
-            or by in BUILTIN_NAMES
+            or not bound
+            and (by in HELPERS or by in self.native or by in BUILTIN_NAMES)
         ):
             return by
         self.need(helper="_by")
