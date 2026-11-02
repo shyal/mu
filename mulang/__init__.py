@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.14"
+VERSION = "0.15"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that end a call written without brackets
@@ -354,6 +354,14 @@ RUNTIME = {
         """def _by(key):
     return key if callable(key) else key.__getitem__""",
         "A key for sort, max and min: a function as it is, anything else indexed.",
+    ),
+    "_each": Helper(
+        (),
+        ("_by",),
+        """def _each(key, xs):
+    f = _by(key)
+    return [f(x) for x in xs]""",
+        "key applied to each item of xs: a function called, anything else indexed.",
     ),
     "_pushed": Helper(
         (),
@@ -1869,6 +1877,8 @@ class Parser:
         if kind == "NAME":
             if val in FOLDS and (self.at("for", 1) or self.at("from", 1)):
                 return self.fold()
+            if val in FOLDS and self.fold_in_ahead():
+                return self.fold_in()
             if val == "first" and self.peek(1)[0] == "NAME" and self.at("in", 2):
                 return self.first()
             if val in KEYWORDS:
@@ -2313,6 +2323,32 @@ class Parser:
         if start is None:
             return Py(f"{op}({gen})")
         return Py(f"{op}({start}, {op}({gen}, default={start}))")
+
+    def fold_in_ahead(self):
+        """Whether `sum f in xs` starts here: a fold word, one name, `in`."""
+        t = self.peek(1)
+        return t[0] == "NAME" and t[1] not in KEYWORDS and self.at("in", 2)
+
+    def fold_in(self):
+        """sum|max|min|count NAME in iter: NAME applied to each item the way
+        a `by=` key is, a function called and anything else indexed, and the
+        results folded. count counts the items NAME holds for. A helper or
+        a builtin is called inline; a name the file binds goes through
+        `_each`, which tests it once and applies it to every item."""
+        op = self.next()[1]
+        fn = self.next()[1]
+        self.expect("in")
+        it = self.or_()
+        if (fn in HELPERS and fn not in self.imported) or fn in self.native:
+            self.bare.add(fn)
+        self.folds.append((op, False, False, False))
+        if str(self.key_of(Py(fn))) == fn:
+            if op == "count":
+                return Py(f"sum([1 for _ in {it} if {fn}(_)])")
+            return Py(f"{op}([{fn}(_) for _ in {it}])")
+        self.need(helper="_each")
+        each = f"_each({fn}, {it})"
+        return Py(f"sum(map(bool, {each}))" if op == "count" else f"{op}({each})")
 
     def first_block_ahead(self):
         """Whether `first k in lo..hi` with no `if` ends the line and a block

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+mu 0.15: `sum`, `max`, `min` and `count` before `f in xs` are coloured
+as folds.
+
 ## 0.5.1
 
 mu 0.14: `memo` before a `{` block lambda is coloured as the modifier.

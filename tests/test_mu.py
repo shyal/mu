@@ -1762,6 +1762,46 @@ def test_by_indexes_a_list_a_dict_or_a_string():
     assert ns["p"]([3, 2, 1]) == [3, 1, 2]  # even is False then True
 
 
+def test_a_fold_applies_a_name_to_each_item():
+    """`sum f in xs` applies f to each item as a `by=` key is applied and
+    folds the results; `count f in xs` counts the items f holds for. A
+    helper or a builtin is called inline; a parameter or a local goes
+    through `_each`, which indexes anything that is not a function."""
+    src = (
+        "def f(a: [int]) -> int\n"
+        "  count odd in a\n"
+        "def g(rows: [[int]]) -> int\n"
+        "  sum len in rows\n"
+        "def h(nodes: [int], depth: [int]) -> int\n"
+        "  max depth in nodes\n"
+        "def k(xs: [int]) -> int\n"
+        "  def neg(x)\n"
+        "    -x\n"
+        "  min neg in xs\n"
+        "def m(xs: [int], ys: [int]) -> bool\n"
+        "  (sum xs) in ys\n"
+        "def p(xs: [int], flags: [bool]) -> int\n"
+        "  count flags in 0..<len(xs)\n"
+    )
+    out = transpile(src)
+    assert "sum([1 for _ in a if odd(_)])" in out and "def odd(n):" in out
+    assert "sum([len(_) for _ in rows])" in out
+    assert "max(_each(depth, nodes))" in out
+    assert "min(_each(neg, xs))" in out
+    assert "(sum(xs)) in ys" in out
+    assert "sum(map(bool, _each(flags, range(" in out
+    assert out.count("def _each(key, xs):") == 1
+    ns = {}
+    exec(out, ns)
+    assert ns["f"]([1, 2, 3, 4]) == 2
+    assert ns["g"]([[1, 2], [3]]) == 3
+    assert ns["h"]([0, 2], [5, 1, 9]) == 9
+    assert ns["k"]([1, 3, 2]) == -3
+    assert ns["m"]([1, 2], [3, 4])
+    assert ns["p"]([5, 6, 7], [True, False, True]) == 2
+    assert fmt("x = count  odd   in a\n") == "x = count odd in a\n"
+
+
 def test_by_on_a_local_function_still_calls_it():
     """A local def passed as `by=` goes through `_by` too and is called."""
     src = (

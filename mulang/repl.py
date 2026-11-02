@@ -74,10 +74,13 @@ def highlight(line):
     for n, k in enumerate(words):
         g, v = toks[k]
         nxt = toks[words[n + 1]][1] if n + 1 < len(words) else ""
+        nxt2 = toks[words[n + 2]][1] if n + 2 < len(words) else ""
         prev = toks[words[n - 1]][1] if n else ""
         style = {"num": "num", "str": "str", "comment": "comment"}.get(g, "")
         if g == "name":
-            if v in ("sum", "max", "min", "count") and nxt in ("for", "from"):
+            if v in ("sum", "max", "min", "count") and (
+                nxt in ("for", "from") or nxt2 == "in"
+            ):
                 style = "fold"
             elif v in FOLD_WORDS:
                 style = "fold"

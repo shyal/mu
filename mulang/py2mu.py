@@ -74,6 +74,21 @@ CACHE_DECORATORS = {"cache", "lru_cache", "functools.cache", "functools.lru_cach
 NO_SELF = {"staticmethod", "classmethod", "property"}
 
 
+def applies(node, target):
+    """The name f when node is f(x) and target is the name x, else None."""
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and isinstance(target, ast.Name)
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == target.id
+    ):
+        return None
+    return node.func.id
+
+
 def call_name(node):
     return ast.unparse(node.func) if isinstance(node, ast.Call) else None
 
@@ -157,7 +172,25 @@ class Canon(ast.NodeTransformer):
     back as range(len(xs)), the list a fold hands to sum, max or min
     where the Python passed a generator, and the three spellings of a key
     that indexes (`_by(xs)`, `xs.__getitem__`, `lambda i: xs[i]`), which
-    mu writes as `by=xs`."""
+    mu writes as `by=xs`, and the name of a comprehension's one variable,
+    which `sum f in xs` writes back as `_`."""
+
+    @staticmethod
+    def item_named_(node):
+        """A comprehension over one plain name, that name renamed `_`."""
+        g = node.generators[0]
+        if len(node.generators) != 1 or not isinstance(g.target, ast.Name):
+            return node
+        old = g.target.id
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, n):
+                return ast.Name("_", n.ctx) if n.id == old else n
+
+        node.elt = Rename().visit(node.elt)
+        g.target = ast.Name("_", ast.Store())
+        g.ifs = [Rename().visit(c) for c in g.ifs]
+        return node
 
     @staticmethod
     def pair_lambda(node):
@@ -213,6 +246,8 @@ class Canon(ast.NodeTransformer):
             return inner
         if hasattr(node, "ctx"):
             node.ctx = ast.Load()
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            node = self.item_named_(node)
         if isinstance(node, ast.Call):
             node.keywords.sort(key=lambda k: k.arg or "")
             if call_name(node) == "range" and len(node.args) == 1:
@@ -577,9 +612,19 @@ class Printer:
         if len(g.ifs) > 1 or g.is_async:
             return None
         names, it = self.loop_head(g.target, g.iter)
+        counts = name == "sum" and is_const(gen.elt, 1) and type(gen.elt.value) is int
+        if counts and len(g.ifs) == 1:
+            applied = applies(g.ifs[0], g.target)
+        elif not g.ifs:
+            applied = applies(gen.elt, g.target)
+        else:
+            applied = None
+        if applied and not start:
+            # sum(f(x) for x in xs) is `sum f in xs`; sum(1 for x in xs if f(x)) counts
+            return f"{'count' if counts else name} {applied} in {self.expr(it, OR)}"
         where = f" if {self.expr(g.ifs[0], OR)}" if g.ifs else ""
         head = f"for {names} in {self.expr(it, OR)}{where}"
-        if name == "sum" and is_const(gen.elt, 1) and type(gen.elt.value) is int:
+        if counts:
             return f"count {head}"
         return f"{name}{start} {head}: {self.expr(gen.elt, IFEXP)}"
 

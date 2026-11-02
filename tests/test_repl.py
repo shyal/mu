@@ -99,6 +99,8 @@ def test_highlight_classes():
     assert got["..<"] == "range"
     assert got["len"] == "builtin" and got["f"] == "call"
     assert got["0"] == "num" and got[">="] == "op"
+    got = styles("count odd in a")
+    assert got["count"] == "fold" and got["in"] == "control"
     assert styles("max(a, b)")["max"] == "builtin"
     assert styles("x = inf")["inf"] == "const"
     got = styles("sum for xs: _ * _x")

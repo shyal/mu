@@ -201,6 +201,16 @@ CASES = {
         """,
         1,
     ),
+    "applied fold": (
+        """
+        return sum(len(r) for r in grid) + sum(1 for r in grid if any(r)) + min(len(r) for r in grid)
+        """,
+        """
+        def f(grid: [[int]]) -> int
+          (sum len in grid) + (count any in grid) + (min len in grid)
+        """,
+        11,
+    ),
     "pairs back": (
         """
         row = grid[1]
