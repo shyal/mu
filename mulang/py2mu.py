@@ -405,7 +405,16 @@ class Printer:
     def e_Compare(self, node):
         parts = [self.expr(node.left, RANGE)]
         for op, right in zip(node.ops, node.comparators):
-            parts += [CMPOPS[type(op)], self.expr(right, RANGE)]
+            text = self.expr(right, RANGE)
+            # `x is f` with f a bare name is a test in mu; Python's identity
+            # test on a name keeps its brackets, `x is (f)`
+            if (
+                isinstance(op, (ast.Is, ast.IsNot))
+                and isinstance(right, ast.Name)
+                and right.id not in ("self", "cls")
+            ):
+                text = f"({text})"
+            parts += [CMPOPS[type(op)], text]
         return " ".join(parts), CMP
 
     def e_IfExp(self, node):

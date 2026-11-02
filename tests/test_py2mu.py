@@ -479,3 +479,16 @@ def test_key_by_a_getter_translates_to_by():
     )
     assert "max(xs, by=x -> (x % 3, x))" in got
     runs(got, "f([1, 5, 9, 2])", 5)
+
+
+def test_is_on_a_name_keeps_brackets():
+    """Python's `a is b` on a name is the identity test; mu reads a bare
+    name after `is` as a test, so py2mu writes `a is (b)`. None and self
+    need none."""
+    mu = mu_of(
+        """
+        p = grid[0]
+        return p is grid or p is not None or grid is self
+        """,
+    )
+    assert "p is (grid) or p is not none or grid is self" in mu

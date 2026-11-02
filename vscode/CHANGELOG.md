@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+mu 0.16: the helpers `prime`, `substrings` and `count_subarrays` are
+coloured as helpers.
+
 ## 0.5.2
 
 mu 0.15: `sum`, `max`, `min` and `count` before `f in xs` are coloured

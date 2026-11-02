@@ -1802,6 +1802,50 @@ def test_a_fold_applies_a_name_to_each_item():
     assert fmt("x = count  odd   in a\n") == "x = count odd in a\n"
 
 
+def test_is_a_name_is_a_test():
+    """`x is NAME` is a test: a helper is called on x, a name the file
+    binds goes through `_is`, which calls a function and tests identity
+    on anything else, and a name nothing binds is a method `isNAME` of x.
+    none, a builtin, a class and a name in brackets stay Python's `is`."""
+    src = (
+        "def leaf(n) -> bool\n"
+        "  not n.left and not n.right\n"
+        "def f(x: int) -> bool\n"
+        "  x is even\n"
+        "def g(x: int) -> bool\n"
+        "  x is not odd\n"
+        "def h(c: str) -> bool\n"
+        "  c is digit and c is not space\n"
+        "def k(x, p) -> bool\n"
+        "  x is p\n"
+        "def m(n) -> bool\n"
+        "  n is leaf\n"
+        "def q(x, t) -> bool\n"
+        "  x is none or type(x) is int or t is max or x is (t)\n"
+        "def r(xs, f) -> bool\n"
+        "  xs is f.ok or xs is f[0]\n"
+    )
+    out = transpile(src)
+    assert "return even(x)" in out and "def even(n):" in out
+    assert "return not odd(x)" in out
+    assert "return c.isdigit() and not c.isspace()" in out
+    assert "return _is(x, p)" in out and out.count("def _is(x, f):") == 1
+    assert "return _is(n, leaf)" in out
+    assert "return x is None or type(x) is int or t is max or x is (t)" in out
+    assert "return xs is f.ok or xs is f[0]" in out
+    ns = {}
+    exec(out, ns)
+    assert ns["f"](4) and not ns["f"](3)
+    assert ns["g"](4) and not ns["g"](3)
+    assert ns["h"]("7") and not ns["h"](" ") and not ns["h"]("x")
+    assert ns["k"](None, None) and not ns["k"](1, 2)
+    assert ns["k"](3, ns["odd"]) and not ns["k"](4, ns["odd"])
+    assert ns["m"](type("N", (), {"left": None, "right": None})())
+    assert ns["q"](None, 0) and ns["q"](3, 0) and ns["q"]("a", max) and ns["q"]("a", "a")
+    assert not ns["q"]("a", "b")
+    assert fmt("if x  is  even\n  pass\n") == "if x is even\n  pass\n"
+
+
 def test_by_on_a_local_function_still_calls_it():
     """A local def passed as `by=` goes through `_by` too and is called."""
     src = (

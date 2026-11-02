@@ -2,7 +2,7 @@
   "name": "mu",
   "displayName": "mu",
   "description": "Highlighting, formatting, hover, completion, go-to-definition, signature help, rename and debugging for mu, a small language that transpiles to Python",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "publisher": "shyal",
   "license": "MIT",
   "repository": {

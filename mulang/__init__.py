@@ -27,9 +27,11 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.15"
+VERSION = "0.16"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
+# names that stay Python's `is`, the identity test, on the right of `is`
+IDENTITY = {"None", "True", "False", "none", "true", "false", "self", "cls", "mu", "inf", "Ellipsis", "NotImplemented"}
 # names that end a call written without brackets
 NOT_ARGS = {"from", "in", "not", "and", "or", "if", "else", "is", "for", "while"}
 NOT_ARGS |= {"elif", "def", "memo", "return", "del", "assert", "pass", "break"}
@@ -354,6 +356,15 @@ RUNTIME = {
         """def _by(key):
     return key if callable(key) else key.__getitem__""",
         "A key for sort, max and min: a function as it is, anything else indexed.",
+    ),
+    "_is": Helper(
+        (),
+        (),
+        """def _is(x, f):
+    if callable(f) and not isinstance(f, type):
+        return f(x)
+    return x is f""",
+        "x is f: a function applied to x, anything else the identity test.",
     ),
     "_each": Helper(
         (),
@@ -1656,11 +1667,45 @@ class Parser:
                 if self.at("not"):
                     self.next()
                     op = "is not"
+                test = self.is_test(e)
+                if test is not None:
+                    e = Py(f"not {test}" if op == "is not" else test)
+                    continue
             else:
                 return e
             lhs, rhs = e, self.range_()
             e = Py(f"{lhs} {op} {rhs}")
             e.cmpparts = None if getattr(lhs, "cmpparts", None) else (lhs, op, rhs)
+
+    def is_test(self, x):
+        """`x is NAME`, NAME a bare name, as a test: a helper is called on
+        x, `x is even` is `even(x)`; a name the file binds goes through
+        `_is`, which at run time calls a function and tests identity on
+        anything else; a name nothing binds is a method of x, `c is digit`
+        is `c.isdigit()`. None, true, false, self, a builtin, a helper
+        class and anything that is not a bare name stay Python's `is`, the
+        identity test, and so does a name in brackets, `x is (f)`. Returns
+        None for those."""
+        t = self.peek()
+        name = t[1]
+        if t[0] != "NAME" or name in KEYWORDS or name in IDENTITY:
+            return None
+        if self.peek(1)[1] in ("(", ".", "[") and self.peek(1)[0] == "OP":
+            return None
+        if any(name in names for names in self.known):
+            self.next()
+            self.need(helper="_is")
+            return f"_is({x}, {name})"
+        if (name in HELPERS and name not in self.imported) or name in self.native:
+            if helper_of(self.native.get(name, name)).source.startswith("class "):
+                return None
+            self.next()
+            self.bare.add(name)
+            return f"{name}({x})"
+        if name in BUILTIN_NAMES:
+            return None
+        self.next()
+        return f"{x}.is{name}()"
 
     def range_(self):
         """`lo..hi` and `lo..<hi`, with `by s` the step. An inclusive end
@@ -3067,7 +3112,7 @@ def compile_stmts(src, last="_ = {}"):
 # formatter
 
 STATEMENT_WORDS = {
-    "def", "memo", "for", "in", "if", "elif", "else", "while", "return", "and",
+    "def", "memo", "for", "in", "is", "if", "elif", "else", "while", "return", "and",
     "or", "not", "from", "first", "break", "continue", "yield", "class", "extends",
     "with", "as", "try", "except", "finally", "raise", "global", "nonlocal",
     "async", "await",
