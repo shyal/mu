@@ -264,7 +264,7 @@ class Solution
       | i > j        -> 0
       | i == j       -> 1
       | s[i] == s[j] -> 2 + f(i + 1, j - 1)
-      | else         -> max(f(i + 1, j), f(i, j - 1))
+      |              -> max(f(i + 1, j), f(i, j - 1))
     f(0, len(s) - 1)
 ```
 
@@ -438,7 +438,7 @@ class Solution
       | i == len(word1)      -> len(word2) - j
       | j == len(word2)      -> len(word1) - i
       | word1[i] == word2[j] -> f(i + 1, j + 1)
-      | else                 -> 1 + min(f(i + 1, j), f(i, j + 1))
+      |                      -> 1 + min(f(i + 1, j), f(i, j + 1))
     f(0, 0)
 ```
 
@@ -922,7 +922,7 @@ class Solution
     memo f(i, j) =
       | i == len(text1) or j == len(text2) -> 0
       | text1[i] == text2[j]               -> 1 + f(i + 1, j + 1)
-      | else                               -> max(f(i + 1, j), f(i, j + 1))
+      |                                    -> max(f(i + 1, j), f(i, j + 1))
     f(0, 0)
 ```
 
@@ -1207,7 +1207,7 @@ class Solution:
 
 ## Spec
 
-The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md), [v0.14](spec/v0.14.md), [v0.15](spec/v0.15.md), [v0.16](spec/v0.16.md).
+The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md), [v0.14](spec/v0.14.md), [v0.15](spec/v0.15.md), [v0.16](spec/v0.16.md), [v0.17](spec/v0.17.md).
 
 ## Profiles
 

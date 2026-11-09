@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.16"
+VERSION = "0.17"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that stay Python's `is`, the identity test, on the right of `is`
@@ -1370,15 +1370,16 @@ class Parser:
         return ("memo", name, params, cases)
 
     def cases(self):
-        """`| guard -> value` lines, one case each; `| else ->` matches
-        everything. (guard, value) for each, the guard None for else."""
+        """`| guard -> value` lines, one case each; `| ->`, no guard, and
+        `| else ->` match everything. (guard, value) for each, the guard None
+        for those."""
         cases = []
         while self.at("|"):
             self.next()
             guard = None
             if self.at("else"):
                 self.next()
-            else:
+            elif not self.at("->"):
                 guard = self.expr()
             self.expect("->")
             cases.append((guard, self.expr()))

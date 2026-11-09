@@ -955,7 +955,7 @@ class Printer:
         out = [f"{pad}memo {fn.name}({params}) ="]
         for test, val in cases:
             out.append(f"{pad}  | {self.top(test)} -> {self.bare(val)}")
-        out.append(f"{pad}  | else -> {self.bare(body[0].value)}")
+        out.append(f"{pad}  | -> {self.bare(body[0].value)}")
         return out
 
 

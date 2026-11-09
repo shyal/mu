@@ -1859,3 +1859,24 @@ def test_by_on_a_local_function_still_calls_it():
     ns = {}
     exec(out, ns)
     assert ns["f"]([1, 3, 2]) == [3, 2, 1]
+
+
+def test_a_case_with_no_guard_matches_everything():
+    src = (
+        "def f(n: int) -> int\n"
+        "  memo g(i) =\n"
+        "    | i == 0 -> 0\n"
+        "    |        -> i + g(i - 1)\n"
+        "  h = memo {k ->\n"
+        "    | k < 2 -> k\n"
+        "    |       -> mu(k - 1) + mu(k - 2)\n"
+        "  }\n"
+        "  g(n) + h(n)\n"
+    )
+    ns = {}
+    exec(transpile(src), ns)
+    assert ns["f"](10) == 55 + 55
+    assert fmt(src) == src
+    bare = "memo g(i) =\n  | i == 0 -> 0\n  | -> i + g(i - 1)\nprint g(3)\n"
+    word = bare.replace("| ->", "| else ->")
+    assert transpile(bare) == transpile(word)

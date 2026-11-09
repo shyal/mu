@@ -11,6 +11,7 @@ hooks:
 nav:
   - Home: index.md
   - Specification:
+      - "0.17": spec/v0.17.md
       - "0.16": spec/v0.16.md
       - "0.15": spec/v0.15.md
       - "0.14": spec/v0.14.md

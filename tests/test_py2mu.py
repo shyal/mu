@@ -492,3 +492,22 @@ def test_is_on_a_name_keeps_brackets():
         """,
     )
     assert "p is (grid) or p is not none or grid is self" in mu
+
+
+def test_a_cached_function_of_cases_ends_in_a_bare_guard():
+    got = mu_of(
+        """
+        @cache
+        def best(s, i):
+            if i == n:
+                return -inf
+            if i == n - 1:
+                return nums[i] * s
+            return nums[i] * s + max(0, best(-s, i + 1))
+        return max(best(1, i) for i in range(n))
+        """,
+        sig="f(self, nums: List[int], n: int) -> int",
+    )
+    assert "      |        -> i == n - 1 ? nums[i] * s : nums[i] * s + max(" in got
+    assert "else" not in got
+    runs(got, "f([1, 2, 3], 3)", 3)
