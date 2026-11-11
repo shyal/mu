@@ -2291,17 +2291,16 @@ class Parser:
                 op = "operator.mul"
             # type=list or type=tuple builds the result; with no type it is an iterator
             kind = kw.pop("type", "None")
+            # initial=v is accumulate's own: the scan starts at v, one item longer
+            start = kw.pop("initial", None)
+            tail = (f", {op}" if op != "+" else "") + (f", initial={start}" if start else "")
             if kw.pop("reverse", None) == "True":
                 # scan from the right: fold the reversed list, then flip it back
-                call = (
-                    f"accumulate({xs}[::-1])"
-                    if op == "+"
-                    else f"accumulate({xs}[::-1], {op})"
-                )
+                call = f"accumulate({xs}[::-1]{tail})"
                 if kind == "None":
                     return Py(f"reversed(list({call}))")
                 return Py(f"{kind}({call})[::-1]")
-            call = f"accumulate({xs})" if op == "+" else f"accumulate({xs}, {op})"
+            call = f"accumulate({xs}{tail})"
             return Py(call if kind == "None" else f"{kind}({call})")
         if fn == "counter":
             self.need("from collections import Counter")

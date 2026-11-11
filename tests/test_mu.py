@@ -762,6 +762,20 @@ def test_scan_type_builds_a_list_or_a_tuple():
     assert "return accumulate(xs, min)" in transpile(src)
 
 
+def test_scan_initial_starts_the_fold():
+    """`initial=v` is accumulate's own: the scan starts at v, one item longer.
+    From the right, the v lands at the end once the list is flipped back."""
+    src = "def f(xs: [int]) -> [int]\n  scan(max, xs, initial=0, type=list)\n"
+    assert "list(accumulate(xs, max, initial=0))" in transpile(src)
+    src = "def f(xs: [int]) -> [int]\n  scan(+, xs, initial=0)\n"
+    assert "return accumulate(xs, initial=0)" in transpile(src)
+    src = "def f(xs: [int]) -> [int]\n  scan(max, xs, reverse=true, initial=0, type=list)\n"
+    assert "list(accumulate(xs[::-1], max, initial=0))[::-1]" in transpile(src)
+    ns = {}
+    exec(transpile(src), ns)
+    assert ns["f"]([1, 3, 2]) == [3, 3, 2, 0]
+
+
 def test_a_dict_mu_makes_gives_its_keys_as_attributes():
     """`dict(a=1)`, `{k: v}`, `{}` and a dict comprehension are a Rec, so
     `d.k` is `d['k']`; a set and a default dict stay as Python has them."""
