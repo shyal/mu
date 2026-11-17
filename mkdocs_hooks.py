@@ -51,3 +51,13 @@ class TogglesExtension(Extension):
 def on_config(config):
     config.markdown_extensions.append(TogglesExtension("mu + pydsa"))
     return config
+
+
+DARK_SOURCE = re.compile(r'\s*<source media="\(prefers-color-scheme: dark\)"[^>]*>')
+
+
+def on_page_content(html, **kwargs):
+    # README.md gives each glyph a white file for the dark theme of GitHub.
+    # The docs site has its own theme switch, and extra.css inverts the
+    # black file there, so the white file is removed.
+    return DARK_SOURCE.sub("", html)

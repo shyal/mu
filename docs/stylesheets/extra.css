@@ -2,3 +2,6 @@
 .md-grid {
   max-width: 76rem;
 }
+
+/* The 無 glyphs in the README are black: invert them on the dark scheme. */
+[data-md-color-scheme="slate"] img.mu-glyph { filter: invert(1); }

@@ -1,5 +1,30 @@
 # mu
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://www.shyal.com/mu/img/mu-seal-white.svg">
+    <img class="mu-glyph" height="96" alt="無 in seal script" src="https://upload.wikimedia.org/wikipedia/commons/6/66/%E7%84%A1-seal.svg">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://www.shyal.com/mu/img/mu-regular-white.svg">
+    <img class="mu-glyph" height="96" alt="無 in regular script" src="https://upload.wikimedia.org/wikipedia/commons/f/fb/Wu_%28negative%29.svg">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://www.shyal.com/mu/img/mu-cursive-white.svg">
+    <img class="mu-glyph" height="96" alt="無 in cursive script" src="https://upload.wikimedia.org/wikipedia/commons/8/8b/%E7%84%A1-still.svg">
+  </picture>
+</p>
+
+The name is the word 無 (Japanese *mu*, Chinese *wú*). It means "no",
+"not", "without". The oldest forms of the character show a dancer with
+long sleeves or tassels in each hand, and the character meant "dance".
+Writers then borrowed it for the negative, which had the same sound. In
+Chan and Zen Buddhism, mu is also pure awareness, before experience or
+knowledge.
+
+The syntax of mu comes from the negative: no colons, no brackets around
+one argument, no imports. The text that remains is the algorithm.
+
 Documentation: [www.shyal.com/mu](https://www.shyal.com/mu/)
 
 mu is a small language that transpiles to Python. A file is indented
