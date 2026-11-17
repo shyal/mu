@@ -3,5 +3,8 @@
   max-width: 76rem;
 }
 
-/* The 無 glyphs in the README are black: invert them on the dark scheme. */
+/* The 無 glyphs in the README: the theme sets height: auto on images, which
+   cancels the height attribute, so the height is set here. They are black:
+   invert them on the dark scheme. */
+.md-typeset img.mu-glyph { height: 96px; width: auto; }
 [data-md-color-scheme="slate"] img.mu-glyph { filter: invert(1); }
