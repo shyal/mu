@@ -1766,7 +1766,9 @@ class Parser:
         """`x is NAME`, NAME a bare name, as a test: a helper is called on
         x, `x is even` is `even(x)`; a name the file binds goes through
         `_is`, which at run time calls a function and tests identity on
-        anything else; a name nothing binds is a method of x, `c is digit`
+        anything else, and so does the target of a comprehension the test
+        is the element of, `[g is w for g, w in pairs]`, which is bound
+        after it is read; a name nothing binds is a method of x, `c is digit`
         is `c.isdigit()`. None, true, false, self, a builtin, a helper
         class and anything that is not a bare name stay Python's `is`, the
         identity test, and so does a name in brackets, `x is (f)`. Returns
@@ -1777,7 +1779,7 @@ class Parser:
             return None
         if self.peek(1)[1] in ("(", ".", "[") and self.peek(1)[0] == "OP":
             return None
-        if any(name in names for names in self.known):
+        if any(name in names for names in self.known) or self.target_ahead(name):
             self.next()
             self.need(helper="_is")
             return f"_is({x}, {name})"
@@ -1791,6 +1793,29 @@ class Parser:
             return None
         self.next()
         return f"{x}.is{name}()"
+
+    def target_ahead(self, name):
+        """Whether a `for ... in` later on this line binds name where the
+        expression here reads it: the clauses of the comprehension the
+        expression is the element of, and of each comprehension around
+        that one. A `for` inside a bracket opened after here is not one."""
+        j, depth, low = self.i + 1, 0, 0
+        while self.toks[j][0] not in ("NEWLINE", "EOF"):
+            kind, v = self.toks[j][:2]
+            if kind == "OP" and v in ("(", "[", "{"):
+                depth += 1
+            elif kind == "OP" and v in (")", "]", "}"):
+                depth -= 1
+                low = min(low, depth)
+            elif v == "for" and kind in ("OP", "NAME") and depth == low:
+                j += 1
+                while self.toks[j][0] not in ("NEWLINE", "EOF") and self.toks[j][1] != "in":
+                    if self.toks[j][:2] == ("NAME", name):
+                        return True
+                    j += 1
+                continue
+            j += 1
+        return False
 
     def range_(self):
         """`lo..hi` and `lo..<hi`, with `by s` the step. An inclusive end

@@ -1933,6 +1933,31 @@ def test_is_a_name_is_a_test():
     assert fmt("if x  is  even\n  pass\n") == "if x is even\n  pass\n"
 
 
+def test_x_is_a_comprehension_target_is_bound_not_a_method():
+    """The element of a comprehension is read before its `for` binds the
+    targets: `g is w` with w a target goes through `_is`, as any bound
+    name does, not to a method `g.isw()`. A `for` in a bracket opened
+    after the test binds nothing for it."""
+    src = (
+        "def same(a, b) -> bool\n"
+        "  all(g is w for g, w in zip(a, b))\n"
+        "def rows(a, b)\n"
+        "  [[g is w for g in a] for w in b]\n"
+        "def digits(s, xs)\n"
+        "  [c is digit for c in s] + [digit for digit in xs]\n"
+    )
+    out = transpile(src)
+    assert "_is(g, w) for g, w in zip(a, b)" in out
+    assert "[[_is(g, w) for g in a] for w in b]" in out
+    assert "[c.isdigit() for c in s] + [digit for digit in xs]" in out
+    ns = {}
+    exec(out, ns)
+    x, y = [1], [1]
+    assert ns["same"]([x, y], [x, y]) and not ns["same"]([x, y], [y, x])
+    assert ns["rows"]([x], [x, y]) == [[True], [False]]
+    assert ns["digits"]("a1", [3]) == [False, True, 3]
+
+
 def test_by_on_a_local_function_still_calls_it():
     """A local def passed as `by=` goes through `_by` too and is called."""
     src = (
