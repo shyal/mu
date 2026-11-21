@@ -24,10 +24,11 @@ import os
 import re
 import symtable
 import sys
+import textwrap
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.17"
+VERSION = "0.18"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that stay Python's `is`, the identity test, on the right of `is`
@@ -552,6 +553,7 @@ NATIVE = {}  # "<path>:<name>" -> Helper, every def of every mu module read
 _MODULES = {}  # path -> (mtime, {name: key}), the names each module defines
 _LOADING = []  # the modules being read, to refuse an import cycle
 _HERE = []  # the directory of each file being transpiled, innermost last
+LEAN = True  # a `[[T]]` parameter is wrapped in Grid only where the body may index it by a pair
 
 
 def mu_path(*dirs):
@@ -568,16 +570,49 @@ def helper_of(key):
     return HELPERS[key] if key in HELPERS else NATIVE[key]
 
 
+def _search_dirs(here=None):
+    dirs = ([here] if here else _HERE[-1:]) + [os.getcwd()]
+    dirs += [d for d in os.environ.get("MUPATH", "").split(os.pathsep) if d]
+    return dirs + MU_PATH
+
+
 def find_module(name, here=None):
     """The path of the mu module `name` (a.b is a/b.mu), or None. here is
     the importing file's directory; the innermost transpile's by default."""
     rel = Path(*name.split(".")).with_suffix(".mu")
-    dirs = ([here] if here else _HERE[-1:]) + [os.getcwd()]
-    dirs += [d for d in os.environ.get("MUPATH", "").split(os.pathsep) if d]
-    for d in dirs + MU_PATH:
+    for d in _search_dirs(here):
         if (Path(d) / rel).is_file():
             return (Path(d) / rel).resolve()
     return None
+
+
+STAR_IMPORT = re.compile(r"^from \.(\w+) import \*", re.M)
+
+
+def package_defs(name, here=None):
+    """{name: key in NATIVE} for what the package `name` re-exports from its
+    mu modules, or None when `name` is no such package. The package is a
+    directory with an __init__.py whose lines `from .m import *` name mu
+    modules m.mu beside it; a later line wins, as in Python."""
+    rel = Path(*name.split(".")) / "__init__.py"
+    for d in _search_dirs(here):
+        init = Path(d) / rel
+        if not init.is_file():
+            continue
+        out = {}
+        for m in STAR_IMPORT.finditer(init.read_text()):
+            sub = init.parent / f"{m.group(1)}.mu"
+            if sub.is_file():
+                out.update(load_module(sub))
+        return out or None
+    return None
+
+
+def module_defs(name, here=None):
+    """{name: key in NATIVE} for the mu module or mu package `name` names,
+    or None when it is neither."""
+    path = find_module(name, here)
+    return load_module(path) if path else package_defs(name, here)
 
 
 def load_module(path):
@@ -611,13 +646,24 @@ def load_module(path):
                 top[target.id] = node
     imports = _imports(tree)
     exported = {}
+    found = {}
     for name, node in top.items():
         line = origin[node.lineno - 1]
-        if line is not None and script is not None and line >= script:
-            continue  # a script line, not part of the module
         source = stripped(node)
         free = {n.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Name)}
         free.discard(name)
+        found[name] = (node, line, source, free)
+    # a name under the script is no part of the module, and neither is a def
+    # that uses one: pasted alone it would call a name nothing defines
+    left = {n for n, (_, line, _, _) in found.items() if line is not None and script is not None and line >= script}
+    while True:
+        more = {n for n, (_, _, _, free) in found.items() if n not in left and free & left}
+        if not more:
+            break
+        left |= more
+    for name, (node, line, source, free) in found.items():
+        if name in left:
+            continue
         deps = tuple(f"{path}:{n}" for n in sorted(free) if n in top)
         imps = tuple(sorted(imports[n] for n in free if n in imports))
         doc = ""
@@ -645,7 +691,13 @@ def native_import(line, at):
         return None  # relative: an import inside a Python package
     path = find_module(module.strip())
     if path is None:
-        return None
+        # a package: a name its mu modules define is read from that module,
+        # and a line naming anything else stays a Python import
+        defined = package_defs(module.strip())
+        wanted = [n.strip() for n in names.strip("() ").split(",")]
+        if defined is None or not all(n in defined for n in wanted):
+            return None
+        return {n: defined[n] for n in wanted}
     defined = load_module(path)
     out = {}
     for name in (n.strip() for n in names.strip("() ").split(",")):
@@ -987,7 +1039,7 @@ class Parser:
             if it is None:
                 tgt, wrap = self.target()
                 self.expect("in")
-                it = iterable(self.expr(), wrap)
+                it = self.wrapped(self.expr(), wrap)
             else:
                 tgt = "_"
             self.known[-1] |= set(NAME.findall(tgt))
@@ -1496,12 +1548,24 @@ class Parser:
         of the iterable), or `>i, x` ("enumerate", index and item). `>`
         marks the index and runs left to right; `<` marks it and runs right
         to left ("range_back", "enumerate_back"). Only the first name may
-        carry the mark."""
+        carry the mark. `+p` ("scan") is the running sum of the items; it
+        is the one name of its target, or the one name after a marked index:
+        `>i, +p` ("enumerate_scan"), `<i, +p` ("enumerate_scan_back", the
+        sums from the right)."""
         if self.at("~"):
             raise TargetError(
                 f"line {self.peek()[2]}: ~ no longer marks the index: "
                 "write >i for the index, <i for the index from the end"
             )
+        if self.at("+"):
+            self.next()
+            total = self.expect_kind("NAME")
+            if self.at(","):
+                raise TargetError(
+                    f"line {self.peek()[2]}: +{total} is the one name of its "
+                    f"target: write scan(+, xs) for the sums beside other names"
+                )
+            return total, "scan"
         if self.at(">") or self.at("<"):
             mark = self.next()[1]
             back = "_back" if mark == "<" else ""
@@ -1509,6 +1573,15 @@ class Parser:
             if not self.at(","):
                 return index, "range" + back
             self.next()
+            if self.at("+"):
+                self.next()
+                total = self.expect_kind("NAME")
+                if self.at(","):
+                    raise TargetError(
+                        f"line {self.peek()[2]}: +{total} is the last name of "
+                        f"its target: write {mark}{index}, +{total}"
+                    )
+                return f"{index}, {total}", "enumerate_scan" + back
             item = self.pattern()
             if self.at(","):
                 raise TargetError(
@@ -1526,8 +1599,19 @@ class Parser:
                 raise TargetError(
                     f"line {self.peek()[2]}: {self.peek()[1]} goes on the first name only"
                 )
+            if self.at("+"):
+                raise TargetError(
+                    f"line {self.peek()[2]}: + marks the one name of a target: "
+                    "write scan(+, xs) for the sums beside other names"
+                )
             parts.append(self.pattern())
         return ", ".join(parts), None
+
+    def wrapped(self, it, wrap):
+        """The Python iterable of a loop, with the import its mark needs."""
+        if wrap and "scan" in wrap:
+            self.need("from itertools import accumulate")
+        return iterable(it, wrap)
 
     def pattern(self):
         if self.at("("):
@@ -2154,7 +2238,7 @@ class Parser:
             tgt, wrap = self.target()
             tgts.append(tgt)
             self.expect("in")
-            out += f" for {tgt} in {iterable(self.or_(), wrap)}"
+            out += f" for {tgt} in {self.wrapped(self.or_(), wrap)}"
             while self.at("if"):
                 self.next()
                 out += f" if {self.or_()}"
@@ -2284,6 +2368,10 @@ class Parser:
             # filter(xs, by=f): the items f holds for, as a list
             return Py(f"list(filter({self.key_of(kw['by'])}, {args[0]}))")
         if fn == "scan":
+            if len(args) != 2:
+                raise MuError(
+                    f"line {self.peek()[2]}: scan takes an operator and an iterable: scan(+, xs)"
+                )
             self.need("from itertools import accumulate")
             op, xs = args
             if op == "*":
@@ -2329,7 +2417,7 @@ class Parser:
         if self.names_a_target():
             tgt, wrap = self.target()
             self.expect("in")
-            it = iterable(self.or_(), wrap)
+            it = self.wrapped(self.or_(), wrap)
         else:
             tgt, it = "_", self.or_()
         where, mark = None, len(self.pending)
@@ -2615,6 +2703,12 @@ def iterable(it, wrap):
         return Py(f"enumerate({it})")
     if wrap == "range_back":
         return Py(f"range(len({it}) - 1, -1, -1)")
+    if wrap == "scan":
+        return Py(f"accumulate({it})")
+    if wrap == "enumerate_scan":
+        return Py(f"enumerate(accumulate({it}))")
+    if wrap == "enumerate_scan_back":
+        return Py(f"zip(range(len({it}) - 1, -1, -1), accumulate(reversed({it})))")
     if wrap == "enumerate_back":
         return Py(f"zip(range(len({it}) - 1, -1, -1), reversed({it}))")
     return it
@@ -2729,6 +2823,7 @@ class Emitter:
         self.method = False  # inside a class body: a def is a method
         self.scopes = []  # names bound by each enclosing def
         self.rets = []  # the ret name of each enclosing def, or None
+        self.grids = False  # some def wraps a parameter in Grid
 
     def out(self, ind, s):
         self.lines.append("    " * ind + s)
@@ -2870,6 +2965,26 @@ class Emitter:
         self.method = was
 
     def def_(self, s, ind):
+        """A def. A method or a top-level function wraps a `[[T]]` parameter
+        in Grid only when its body may index it by a pair: the def is
+        written with each such parameter wrapped, its Python is read, and
+        when a parameter turns out to need no Grid it is written again."""
+        grids = []
+        if not self.scopes:
+            grids = [p for p, t in s[2] if t and t.startswith("list[list[")]
+        if grids:
+            at, fresh, line = len(self.lines), self.fresh, self.src_line
+            self.def_as(s, ind, grids)
+            kept = pair_indexed(self.lines[at:], dict(s[2]), grids) if LEAN else grids
+            if kept != grids:
+                del self.lines[at:], self.origin[at:]
+                self.fresh, self.src_line = fresh, line
+                self.def_as(s, ind, kept)
+            self.grids = self.grids or bool(kept)
+        else:
+            self.def_as(s, ind, grids)
+
+    def def_as(self, s, ind, grids):
         _, name, params, ret, body = s[:5]
         top = not self.scopes  # a method, or a top-level function
         names = {p for p, _ in params}
@@ -2889,13 +3004,9 @@ class Emitter:
             shared = assigned(body) & set().union(*self.scopes) - names
             if shared:
                 self.out(ind + 1, f"nonlocal {', '.join(sorted(shared))}")
-        grids = []
-        if top:
-            for p, t in params:
-                if t and t.startswith("list[list["):
-                    grids.append(p)
-                    self.out(ind + 1, f"_in_{p}, {p} = {p}, Grid({p})")
-                    self.out(ind + 1, f"_w_{p} = {p}")
+        for p in grids:
+            self.out(ind + 1, f"_in_{p}, {p} = {p}, Grid({p})")
+            self.out(ind + 1, f"_w_{p} = {p}")
         if grids:
             # the rows go back into the caller's list, so an in-place
             # sort, reverse or append on the grid reaches the caller
@@ -2993,21 +3104,25 @@ def spread(e):
     return out
 
 
-def transpile(src, mapped=False, path=None, library=True):
+def transpile(src, mapped=False, path=None, library=True, lean=True):
     """The Python for a mu file. With mapped, also a list with one entry per
     output line: the mu line it comes from, or None for a pasted helper.
     path is the file's own, where its mu imports are looked for first.
     With library=False, no profile helper is pasted, only the language's
-    own: the Python of a library module is the same in every process."""
-    global HELPERS
+    own: the Python of a library module is the same in every process.
+    With lean=False, every `[[T]]` parameter is wrapped in Grid, also one
+    the body never indexes by a pair: the Python then has one shape
+    whatever the body reads (the IDE compares two such Pythons)."""
+    global HELPERS, LEAN
     _HERE.append(str(Path(path).resolve().parent) if path else os.getcwd())
-    kept = HELPERS
+    kept = HELPERS, LEAN
     if not library:
         HELPERS = dict(RUNTIME)
+    LEAN = lean
     try:
         return _transpile(src, mapped)
     finally:
-        HELPERS = kept
+        HELPERS, LEAN = kept
         _HERE.pop()
 
 
@@ -3028,25 +3143,27 @@ def _transpile(src, mapped):
         if k:
             e.out(0, "\n")
         e.stmt(d, 0, False)
+    script = Emitter(at_line=p.at_line)
+    for k, st in enumerate(p.script):
+        # a def or class among the script's lines is set apart, as above
+        kinds = {st[0], p.script[k - 1][0]} if k else set()
+        if kinds & {"def", "class"}:
+            script.out(0, "\n")
+        script.stmt(st, 0, False)
     parts = [p.docstring] if p.docstring else []
     if p.imports:
         parts.append("\n".join(sorted(p.imports)))
     if p.memo_used:
         parts.append("sys.setrecursionlimit(1 << 20)")
-    # two mu modules may paste the same library helper: once is enough
-    parts += list(dict.fromkeys(helper_of(h).source for h in p.helpers))
+    # two mu modules may paste the same library helper: once is enough;
+    # Grid is pasted only when a def kept a parameter wrapped
+    helpers = [h for h in p.helpers if h != "Grid" or e.grids or script.grids]
+    parts += list(dict.fromkeys(helper_of(h).source for h in helpers))
     origins = [[None] * (part.count("\n") + 1) for part in parts]
     if e.lines or not p.script:  # a file of only a script has no defs part
         parts.append("\n".join(e.lines))
         origins.append(spread(e) or [None])
     if p.script:
-        script = Emitter(at_line=p.at_line)
-        for k, st in enumerate(p.script):
-            # a def or class among the script's lines is set apart, as above
-            kinds = {st[0], p.script[k - 1][0]} if k else set()
-            if kinds & {"def", "class"}:
-                script.out(0, "\n")
-            script.stmt(st, 0, False)
         parts.append("\n".join(script.lines))
         origins.append(spread(script))
     code = "\n\n\n".join(parts) + "\n"
@@ -3085,6 +3202,136 @@ def parsed(src, run, primes=frozenset(), strings=frozenset()):
         return p, out
 
 
+# builtins that read a list of rows and index nothing by a pair
+READS_ROWS = {"len", "enumerate", "sorted", "reversed", "zip", "iter", "list", "tuple", "sum", "min", "max",
+              "any", "all", "bool", "print", "id"}
+INT_OPS = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.LShift, ast.RShift, ast.BitOr,
+           ast.BitXor, ast.BitAnd)
+
+
+def pair_indexed(lines, types, grids):
+    """Of the grid parameters of the def in `lines` (its Python, each grid
+    wrapped), those the body may index by a pair, so those that stay
+    wrapped. A grid needs no Grid when every use of it is one that a plain
+    list of rows serves the same way: a loop over it, a method call on it,
+    a call of a builtin that only reads it, a test, a return, a slice, or
+    an index that is an integer for certain. Any other use keeps the Grid
+    (the grid handed to a helper, or given a second name), and so does a
+    def this cannot read."""
+    try:
+        fn = ast.parse(textwrap.dedent("\n".join(lines))).body[0]
+        body = next(n for n in fn.body if isinstance(n, ast.Try)).body
+    except (SyntaxError, StopIteration, IndexError):
+        return list(grids)
+    parent = {c: n for b in body for n in ast.walk(b) for c in ast.iter_child_nodes(n)}
+    ints = int_names(fn, body, types)
+
+    def plain_use(name):
+        up = parent.get(name)
+        if isinstance(up, ast.Subscript) and up.value is name:
+            return isinstance(up.slice, ast.Slice) or is_int(up.slice, ints)
+        if isinstance(up, (ast.For, ast.comprehension)):
+            return up.iter is name
+        if isinstance(up, ast.Call):
+            return isinstance(up.func, ast.Name) and up.func.id in READS_ROWS and name in up.args
+        if isinstance(up, ast.Attribute):
+            return isinstance(parent.get(up), ast.Call) and parent[up].func is up
+        if isinstance(up, (ast.If, ast.While, ast.IfExp)):
+            return up.test is name
+        return isinstance(up, (ast.Return, ast.BoolOp, ast.Compare)) or (
+            isinstance(up, ast.UnaryOp) and isinstance(up.op, ast.Not)
+        )
+
+    uses = [n for b in body for n in ast.walk(b) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)]
+    return [g for g in grids if not all(plain_use(n) for n in uses if n.id == g)]
+
+
+def is_int(e, ints):
+    """True when the expression is an integer for certain, given the names
+    known to hold only integers."""
+    if isinstance(e, ast.Constant):
+        return type(e.value) is int
+    if isinstance(e, ast.Name):
+        return e.id in ints
+    if isinstance(e, ast.UnaryOp):
+        return isinstance(e.op, (ast.USub, ast.UAdd, ast.Invert)) and is_int(e.operand, ints)
+    if isinstance(e, ast.BinOp):
+        return isinstance(e.op, INT_OPS) and is_int(e.left, ints) and is_int(e.right, ints)
+    if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not e.keywords:
+        if e.func.id in ("len", "int", "ord"):
+            return True
+        if e.func.id in ("min", "max", "abs"):
+            return (len(e.args) > 1 or e.func.id == "abs") and all(is_int(a, ints) for a in e.args)
+    return False
+
+
+def int_names(fn, body, types):
+    """The names of a def that hold only integers: a parameter typed int, a
+    loop variable over a range, the index of an enumerate, the items of a
+    row of a `[[int]]` parameter, and a name whose every assignment is an
+    integer expression. A name bound in any other way is left out."""
+    binds = {}  # name -> the expressions it is bound to; None for a binding not read here
+
+    def bind(target, value):
+        if isinstance(target, ast.Name):
+            binds.setdefault(target.id, []).append(value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            values = value.elts if isinstance(value, (ast.Tuple, ast.List)) else []
+            for k, t in enumerate(target.elts):
+                bind(t, values[k] if len(values) == len(target.elts) else None)
+        elif isinstance(target, ast.Starred):
+            bind(target.value, None)
+
+    def loop(target, it):
+        call = it.func.id if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) else None
+        if call == "range":
+            bind(target, ast.Constant(0))
+        elif call == "enumerate" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            bind(target.elts[0], ast.Constant(0))
+            bind(target.elts[1], None)
+        elif isinstance(it, ast.Name) and types.get(it.id) == "list[list[int]]" and isinstance(target, ast.Tuple):
+            for t in target.elts:
+                bind(t, ast.Constant(0) if isinstance(t, ast.Name) else None)
+        else:
+            bind(target, None)
+
+    for a in fn.args.args:
+        binds.setdefault(a.arg, []).append(ast.Constant(0) if types.get(a.arg) == "int" else None)
+    for n in (n for b in body for n in ast.walk(b)):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                bind(t, n.value)
+        elif isinstance(n, ast.AugAssign):
+            bind(n.target, n.value if isinstance(n.op, INT_OPS) else None)
+        elif isinstance(n, (ast.AnnAssign, ast.NamedExpr)):
+            bind(n.target, n.value)
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            loop(n.target, n.iter)
+        elif isinstance(n, ast.arg):
+            binds.setdefault(n.arg, []).append(None)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            binds.setdefault(n.name, []).append(None)
+        elif isinstance(n, ast.alias):
+            binds.setdefault((n.asname or n.name).split(".")[0], []).append(None)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            binds.setdefault(n.name, []).append(None)
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            bind(n.optional_vars, None)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for name in n.names:
+                binds.setdefault(name, []).append(None)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del):
+            binds.setdefault(n.id, []).append(None)
+    # the largest set that agrees with itself: start from every name bound
+    # only to expressions, drop a name while one of its expressions is no integer
+    ints = {name for name, values in binds.items() if None not in values}
+    while True:
+        out = {name for name in ints if not all(is_int(v, ints) for v in binds[name])}
+        if not out:
+            return ints
+        ints -= out
+
+
 def grid_defs(stmts):
     """The defs that take grids: top-level defs and the methods of classes."""
     out = []
@@ -3106,7 +3353,8 @@ def compile_stmts(src, last="_ = {}"):
         p.need(helper="Grid")
     e = Emitter()
     e.block(stmts, 0, returns=last)
-    return sorted(p.imports), list(p.helpers), "\n".join(e.lines) + "\n"
+    helpers = [h for h in p.helpers if h != "Grid" or e.grids]
+    return sorted(p.imports), helpers, "\n".join(e.lines) + "\n"
 
 
 # formatter
@@ -3202,6 +3450,7 @@ def render(toks, level=0):
     that starts by closing brackets sits with the line that opened them."""
     out, prev, unary, stack = [], None, False, []
     opened, row = [], 0  # the row each open bracket was opened on
+    seen = []  # the values of the last tokens, for the mark in `for >i, +p`
     if toks and toks[0] == ("OP", "@"):
         toks = [("DECO", "@")] + list(toks[1:])  # a decorator, not a matmul
     for t in pop_dots(mark_ternaries(toks)):
@@ -3233,8 +3482,11 @@ def render(toks, level=0):
         unary = t[0] == "OP" and (
             t[1] in ("-", "~")
             and opens
-            or t[1] in ("<", ">")
-            and pv == "for"  # the loop mark: for >i, x in xs
+            or t[1] in ("<", ">", "+")
+            and pv == "for"  # the loop mark: for >i, x in xs, for +p in xs
+            or t[1] == "+"
+            and pv == ","
+            and seen[-4:-2] in (["for", ">"], ["for", "<"])  # for >i, +p in xs
             or t[1] in ("*", "**")
             and (prev is None or pv in "([{," or (pk, pv) == ("NAME", "return"))
             or t[1] == ":"
@@ -3242,6 +3494,7 @@ def render(toks, level=0):
         )
         out.append(t[1])
         prev = t
+        seen.append(t[1])
     return "".join(out)
 
 

@@ -241,3 +241,110 @@ def test_definition_of_a_name_from_a_mu_module(tmp_path):
     assert ide.definition(req) == [
         {"path": str((tmp_path / "lib" / "nums.mu").resolve()), "line": 2, "col": 0}
     ]
+
+
+def test_signature_and_definition_of_a_name_from_a_mu_package(tmp_path):
+    """A name a package re-exports from its mu modules has signature help and
+    a definition through `from pkg import name`, not only `from pkg.mod import`."""
+    from mulang import ide
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("from .nums import *\n")
+    (tmp_path / "pkg" / "nums.mu").write_text("X = 1\n\ndef evens(xs: [int], flip: bool=false) -> [int]\n  xs\n")
+    main = tmp_path / "main.mu"
+    text = "from pkg import evens\n\nprint evens(\n"
+    main.write_text(text)
+    req = {"root": str(tmp_path), "path": str(main), "text": text, "line": 2, "col": 12}
+    got = ide.signature({**req, "cmd": "signature"})
+    assert got and got["label"] == "evens(xs, flip=False)"
+    loc = ide.definition({**req, "line": 2, "col": 8})
+    assert loc == [{"path": str((tmp_path / "pkg" / "nums.mu").resolve()), "line": 2, "col": 0}]
+
+
+# --- the language's own call forms, and the names the run time preloads ---
+
+FORM_TEXT = "def f(nums: [int]) -> int\n  x = {}\n"
+
+
+def form_req(cmd, line, col=None):
+    col = len("  x = " + line) if col is None else col
+    return req(cmd, 1, col, FORM_TEXT.format(line))
+
+
+def test_signature_of_scan_while_the_call_is_incomplete():
+    # scan is a form of the language: no Python def stands behind it
+    params = ["op", "xs", "type=None", "initial=None", "reverse=False"]
+    for line, active in (("scan(", 0), ("scan(+, ", 1), ("scan(max, nums, ", 2)):
+        got = ide.signature(form_req("signature", line))
+        assert got["label"] == f"scan({', '.join(params)})"
+        assert (got["params"], got["active"]) == (params, active)
+
+
+def test_hover_on_scan_shows_its_forms():
+    got = ide.hover(form_req("hover", "scan(+, nums)", col=len("  x = s")))
+    assert got["contents"].startswith("```mu\nscan(op, xs, type=None")
+    assert "reverse=True" in got["contents"]
+
+
+def test_every_form_the_transpiler_rewrites_is_documented():
+    import inspect
+    import re
+
+    import mulang
+
+    src = inspect.getsource(mulang)
+    body = src[src.index("    def special(self") :]
+    body = body[: body.index("\n    def ", 1)]
+    named = set(re.findall(r'fn == "(\w+)"', body))
+    for group in re.findall(r"fn in \(([^)]*)\)", body):
+        named |= set(re.findall(r'"(\w+)"', group))
+    assert named and (named | set(mulang.KEYED)) <= set(ide.FORMS)
+    for name in ide.FORMS:
+        assert ide.docs()[name][0].startswith(name + "(")
+
+
+def test_signature_of_the_forms_that_take_another_python_name():
+    # sort is sorted, counter is Counter, dict is Rec in the Python
+    for line, label in (
+        ("sort(nums, ", "sort(xs, by=None, reverse=False)"),
+        ("counter(", "counter(xs)"),
+        ("dict(", "dict(k=v)"),
+    ):
+        assert ide.signature(form_req("signature", line))["label"] == label
+
+
+def test_scan_with_the_wrong_number_of_arguments_is_a_mu_error():
+    import pytest
+
+    import mulang
+
+    for call in ("scan()", "scan(+)", "scan(+, nums, nums)"):
+        with pytest.raises(mulang.MuError, match="scan takes an operator and an iterable"):
+            mulang.transpile(FORM_TEXT.format(call))
+
+
+def test_label_params_split_at_the_top_level_commas():
+    assert ide.label_params("table(m, n, fill=0)") == ["m", "n", "fill=0"]
+    assert ide.label_params("put(grid, at, scan(+, xs))") == ["grid", "at", "scan(+, xs)"]
+    assert ide.label_params("f()") == [] and ide.label_params("inf") == []
+
+
+def test_signature_and_hover_of_a_name_the_run_time_preloads(monkeypatch):
+    # a sitecustomize puts deque and heappush into builtins: the Python the
+    # transpiler writes has no import for them, so Jedi reads the live object
+    import builtins
+    from collections import deque
+    from heapq import heappush
+
+    monkeypatch.setattr(builtins, "deque", deque, raising=False)
+    monkeypatch.setattr(builtins, "heappush", heappush, raising=False)
+    got = ide.signature(form_req("signature", "heappush(nums, "))
+    assert (got["label"], got["params"], got["active"]) == ("heappush(heap, item)", ["heap", "item"], 1)
+    assert ide.signature(form_req("signature", "deque("))["label"].startswith("deque(")
+    hover = ide.hover(form_req("hover", "deque(nums)", col=len("  x = d")))
+    assert hover["contents"].startswith("```mu\ndeque(")
+
+
+def test_no_signature_for_a_name_nothing_defines():
+    assert ide.signature(form_req("signature", "nothing_has_this_name(")) is None
+    assert ide.hover(form_req("hover", "nothing_has_this_name(1)", col=len("  x = n"))) is None

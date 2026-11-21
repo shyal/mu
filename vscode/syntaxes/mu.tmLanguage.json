@@ -135,7 +135,7 @@
       }
     },
     "fold": {
-      "match": "\\b(sum|max|min|count)\\s+(?=(for|from)\\b|[A-Za-z_]\\w*\\s+in\\b)",
+      "match": "\\b(sum|max|min|count)\\s+(?=(for|from|as_dict_of_dicts|generate_random_bst|insert|int_ops|is_edge_list|run_lengths|subsequence_indices)\\b|[A-Za-z_]\\w*\\s+in\\b)",
       "captures": {
         "1": {
           "name": "keyword.other.fold.mu"

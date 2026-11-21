@@ -692,12 +692,23 @@ class Printer:
         """`for i, x in enumerate(xs)` is `for >i, x in xs`; `for i in
         range(len(xs))` is `for >i in xs`; the same loops right to left,
         `range(len(xs) - 1, -1, -1)` and its zip with `reversed(xs)`, are
-        `for <i in xs` and `for <i, x in xs`; a pair unpacks without
-        brackets."""
+        `for <i in xs` and `for <i, x in xs`; `for p in accumulate(xs)` is
+        `for +p in xs`, and with `enumerate` round it `for >i, +p in xs`; a pair unpacks without brackets."""
+        sums = call_name(it) == "accumulate" and len(it.args) == 1 and not it.keywords
+        if isinstance(target, ast.Name) and sums:
+            return f"+{target.id}", it.args[0]
         enum = call_name(it) == "enumerate" and len(it.args) == 1 and not it.keywords
         if isinstance(target, ast.Tuple) and len(target.elts) == 2:
             i, x = target.elts
             if isinstance(i, ast.Name) and enum:
+                inner = it.args[0]
+                if (
+                    isinstance(x, ast.Name)
+                    and call_name(inner) == "accumulate"
+                    and len(inner.args) == 1
+                    and not inner.keywords
+                ):
+                    return f">{i.id}, +{x.id}", inner.args[0]
                 return f">{i.id}, {self.pattern(x)}", it.args[0]
             if isinstance(i, ast.Name) and self.indices_back_of(it, x) is not None:
                 return f"<{i.id}, {self.pattern(x)}", self.indices_back_of(it, x)

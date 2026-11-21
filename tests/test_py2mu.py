@@ -75,6 +75,34 @@ CASES = {
         """,
         8,
     ),
+    "running sum": (
+        """
+        out = 0
+        for p in accumulate(grid[0]):
+            out += p
+        return out + sum(p for p in accumulate(grid[1]))
+        """,
+        """
+        def f(grid: [[int]]) -> int
+          out = sum for +p in grid[0]: p
+          out + (sum for +p in grid[1]: p)
+        """,
+        8,
+    ),
+    "running sum with its index": (
+        """
+        out = []
+        for i, p in enumerate(accumulate(grid[0])):
+            out.append(i * p)
+        return sum(out)
+        """,
+        """
+        def f(grid: [[int]]) -> int
+          out = [i * p for >i, +p in grid[0]]
+          sum(out)
+        """,
+        7,
+    ),
     "comprehension": (
         """
         out = []

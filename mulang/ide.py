@@ -18,6 +18,7 @@ of a word on a mu line is taken to be the k-th on the Python lines it made.
 """
 
 import ast
+import builtins
 import inspect
 import io
 import json
@@ -40,8 +41,7 @@ from . import (
     PATHS,
     RUNTIME,
     MuError,
-    find_module,
-    load_module,
+    module_defs,
     mu_type,
     profile,
     transpile,
@@ -63,6 +63,30 @@ KEYWORDS = sorted(
     | {"async", "await", "by"}
 )
 TRIES = 200
+# The call forms of the language itself: the transpiler rewrites each one, so
+# no Python def stands behind the name and Jedi has no signature for it.
+# name -> its lines, `call  # what it gives`, as in a profile's documentation.
+FORMS = {
+    "scan": [
+        "scan(op, xs, type=None, initial=None, reverse=False)"
+        "  # the running fold of xs: op is +, *, max, min or a function",
+        "scan(+, xs)                      # the running sums, as an iterator",
+        "scan(max, xs, type=list)         # the running maximums, as a list",
+        "scan(+, xs, initial=0)           # starts at 0: one item longer",
+        "scan(max, xs, reverse=True)      # the fold from the right end",
+    ],
+    "sort": ["sort(xs, by=None, reverse=False)  # a new sorted list; by gives the key of an item"],
+    "counter": ["counter(xs)  # Counter(xs): the count of each item"],
+    "dict": ['dict(k=v)  # a dict whose keys are also attributes: d.k is d["k"]'],
+    "filter": ["filter(xs, by=f)  # the items f holds for, as a list"],
+    "ceil": ["ceil(a / b)  # the ceiling of the division, in integers: no float"],
+    "floor": ["floor(a / b)  # a // b"],
+    "max": ["max(xs, by=f)  # the item with the largest f(item)"],
+    "min": ["min(xs, by=f)  # the item with the smallest f(item)"],
+    "nlargest": ["nlargest(n, xs, by=f)  # the n items with the largest f(item)"],
+    "nsmallest": ["nsmallest(n, xs, by=f)  # the n items with the smallest f(item)"],
+    "groupby": ["groupby(xs, by=f)  # consecutive items with the same f(item), as (key, items)"],
+}
 
 
 def doc_lines():
@@ -196,6 +220,9 @@ def _docs(revision):
     out = helper_docs()
     for name, lines in registry_docs().items():
         out.setdefault(name, lines)
+    # the language's own forms last: a profile may document a name its own way
+    for name, lines in FORMS.items():
+        out.setdefault(name, lines)
     return out
 
 
@@ -254,7 +281,7 @@ def repaired(lines, path=None):
     lines, blanked = unclosed(lines)
     for _ in range(TRIES):
         try:
-            code, origin = transpile("\n".join(lines) + "\n", mapped=True, path=path)
+            code, origin = transpile("\n".join(lines) + "\n", mapped=True, path=path, lean=False)
             return code, origin, blanked
         except MuError as err:
             m = LINE_ERR.match(str(err))
@@ -439,10 +466,31 @@ def hover(req):
     return {"contents": "\n\n".join(parts)}
 
 
-def spec_hover(word):
-    if word not in docs():
+def live(name, call=False):
+    """What Jedi reads from a callable the running Python holds as a builtin
+    and no import of the file binds: the names a sitecustomize preloads
+    (deque, heappush, gcd). Its signature with call, else its name; None
+    when there is no such callable."""
+    obj = getattr(builtins, name, None)
+    if not callable(obj):
         return None
-    return {"contents": "```mu\n" + "\n".join(docs()[word]) + "\n```"}
+    import jedi
+
+    probe = jedi.Interpreter(f"{name}(" if call else name, [{name: obj}])
+    got = probe.get_signatures() if call else probe.infer()
+    return got[0] if got else None
+
+
+def spec_hover(word):
+    if word in docs():
+        return {"contents": "```mu\n" + "\n".join(docs()[word]) + "\n```"}
+    name = live(word)
+    if name is None:
+        return None
+    sig = live(word, call=True)
+    head = sig.to_string() if sig else word
+    doc = name.docstring(raw=True).strip()
+    return {"contents": f"```mu\n{head}\n```" + (f"\n\n{doc}" if doc else "")}
 
 
 MU_IMPORT = re.compile(r"^\s*from ([\w.]+) import (.+)$")
@@ -455,12 +503,9 @@ def native_location(f, name):
         m = MU_IMPORT.match(line)
         if not m or name not in {n.strip() for n in m.group(2).strip("() ").split(",")}:
             continue
-        found = find_module(m.group(1), here)
-        if found is None:
-            return None
         try:
-            h = NATIVE[load_module(found)[name]]
-        except (MuError, KeyError):
+            h = NATIVE[module_defs(m.group(1), here)[name]]
+        except (MuError, KeyError, TypeError):
             return None
         return (h.path, h.line, 0)
     return None
@@ -572,6 +617,22 @@ def call_site(before):
     return None
 
 
+def label_params(label):
+    """The parameters written in a documented call: `scan(op, xs, type=None)`
+    gives ["op", "xs", "type=None"]. Commas inside brackets do not split."""
+    m = re.search(r"\((.*)\)", label)
+    if not m or not m.group(1).strip():
+        return []
+    parts, depth, start = [], 0, 0
+    inner = m.group(1)
+    for k, ch in enumerate(inner):
+        depth += (ch in "([{") - (ch in ")]}")
+        if ch == "," and depth == 0:
+            parts.append(inner[start:k].strip())
+            start = k + 1
+    return parts + [inner[start:].strip()]
+
+
 def signature(req):
     f = File(req)
     site = call_site(f.text[: f.col])
@@ -589,16 +650,17 @@ def signature(req):
                 sigs = script(f.code, f.root).get_signatures(row, m.end())
                 break
     doc = "\n".join(docs().get(callee, []))
-    if not sigs:
-        if not doc:
-            return None
+    if not sigs and doc:
+        label = docs()[callee][0].split("#")[0].strip()
         return {
-            "label": docs()[callee][0].split("#")[0].strip(),
-            "params": [],
+            "label": label,
+            "params": label_params(label),
             "active": index,
             "doc": doc,
         }
-    s = sigs[0]
+    s = sigs[0] if sigs else live(callee, call=True)
+    if s is None:
+        return None
     params = [p.to_string() for p in s.params]
     label = f"{s.name}({', '.join(params)})"
     return {
@@ -806,7 +868,7 @@ def renamed(f, new):
         for ln, start, end in reversed(edits):
             lines[ln] = lines[ln][:start] + new + lines[ln][end:]
         try:
-            got = transpile("\n".join(lines) + "\n", mapped=True, path=f.path)
+            got = transpile("\n".join(lines) + "\n", mapped=True, path=f.path, lean=False)
         except Exception:  # any mu the edit breaks: the transpiler may not say MuError
             return None
         return swapped((f.code, f.origin), got, word, new)

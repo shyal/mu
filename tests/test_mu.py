@@ -524,6 +524,58 @@ def test_a_mark_gives_the_index_of_a_loop():
     assert fmt("if a<b\n  k += i\n") == "if a < b\n  k += i\n"
 
 
+def test_a_plus_mark_gives_the_running_sum():
+    src = (
+        "def f(xs: [int]) -> [int]\n"
+        "  out = []\n"
+        "  for +p in xs\n"
+        "    out <- p\n"
+        "  [out, [p for +p in xs], sum for +p in xs: p, count for +p in xs if p > 1]\n"
+    )
+    out = transpile(src)
+    assert "for p in accumulate(xs):" in out
+    assert out.count("from itertools import accumulate") == 1
+    ns = {}
+    exec(out, ns)
+    assert ns["f"]([1, 2, 3]) == [[1, 3, 6], [1, 3, 6], 10, 2]
+    assert ns["f"]([]) == [[], [], 0, 0]
+    assert fmt(src) == src
+    assert fmt("for + p in xs\n  k += p\n") == "for +p in xs\n  k += p\n"
+    assert fmt("for x in a+b\n  k += x\n") == "for x in a + b\n  k += x\n"
+
+    def loop(head):
+        return transpile(
+            f"def f(xs: [int]) -> int\n  k = 0\n  for {head}\n    k += 1\n  k\n"
+        )
+
+    with pytest.raises(MuError, match=r"\+p is the one name of its target"):
+        loop("+p, x in xs")
+    with pytest.raises(MuError, match=r"\+ marks the one name of a target"):
+        loop("x, +p in xs")
+    with pytest.raises(MuError, match=r"\+p is the last name of its target"):
+        loop(">i, +p, x in xs")
+
+
+def test_a_running_sum_goes_with_a_marked_index():
+    src = (
+        "def f(xs: [int]) -> [(int, int)]\n  out = []\n"
+        "  for >i, +p in xs\n    out <- (i, p)\n"
+        "  for <i, +p in xs\n    out <- (i, p)\n"
+        "  out + [(i, p) for >i, +p in xs]\n"
+    )
+    out = transpile(src)
+    assert "for i, p in enumerate(accumulate(xs)):" in out
+    assert out.count("from itertools import accumulate") == 1
+    ns = {}
+    exec(out, ns)
+    assert ns["f"]([1, 2, 3]) == [
+        (0, 1), (1, 3), (2, 6), (2, 3), (1, 5), (0, 6), (0, 1), (1, 3), (2, 6)
+    ]
+    assert ns["f"]([]) == []
+    assert fmt(src) == src
+    assert fmt("for >i, + p in xs\n  k += p\n") == "for >i, +p in xs\n  k += p\n"
+
+
 def test_a_backward_loop_runs_the_indices_down():
     src = (
         "def f(s: str) -> [int]\n  out = []\n  for <i, c in s\n"
@@ -1375,6 +1427,11 @@ def test_mu_file_runs_the_file(tmp_path):
     assert "mulang" not in run.stderr
     py = subprocess.run([*mu, "--py", str(f)], capture_output=True, text=True)
     assert "print(x[3])" in py.stdout
+    src = "class Solution:\n    def f(self, xs):\n        return len(xs)\n"
+    back = subprocess.run([*mu, "--mu", "-"], input=src, capture_output=True, text=True)
+    assert back.stdout == "class Solution\n  def f(xs)\n    len(xs)\n"
+    none = subprocess.run([*mu, "--mu", "-"], input="x = 1\n", capture_output=True, text=True)
+    assert none.returncode == 1 and "no class Solution" in none.stderr
     stdin = subprocess.run([*mu, "-"], input="xs = [1, 2]\nprint len xs\n", capture_output=True, text=True)
     assert stdin.stdout == "2\n"
 
@@ -1403,6 +1460,22 @@ def test_a_mu_module_is_imported_by_its_defs(tmp_path):
         [sys.executable, "-m", "mulang", str(main)], capture_output=True, text=True, cwd="/"
     )
     assert run.stdout == "[2, 4]\nTrue\n", run.stderr
+
+
+def test_a_mu_package_is_imported_by_its_defs(tmp_path):
+    """`from pkg import evens` follows the `from .nums import *` lines of
+    pkg/__init__.py to nums.mu and pastes the def, as `from pkg.nums import
+    evens` does. A name the mu modules do not define leaves the line a
+    Python import."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("from .nums import *\nfrom .more import *\n")
+    (tmp_path / "pkg" / "nums.mu").write_text("def evens(xs: [int]) -> [int]\n  [x for x in xs if x % 2 == 0]\n")
+    (tmp_path / "pkg" / "more.mu").write_text("def odds(xs: [int]) -> [int]\n  [x for x in xs if x % 2]\n")
+    here = tmp_path / "main.mu"
+    out = transpile("from pkg import evens, odds\nprint(evens([1, 2]), odds([1, 2]))\n", path=here)
+    assert "from pkg" not in out and "def evens(xs):" in out and "def odds(xs):" in out
+    kept = transpile("from pkg import evens, other\nprint(evens([2]))\n", path=here)
+    assert "from pkg import evens, other" in kept and "def evens" not in kept
 
 
 def test_a_mu_import_names_what_it_takes(tmp_path):
@@ -1894,3 +1967,43 @@ def test_a_case_with_no_guard_matches_everything():
     bare = "memo g(i) =\n  | i == 0 -> 0\n  | -> i + g(i - 1)\nprint g(3)\n"
     word = bare.replace("| ->", "| else ->")
     assert transpile(bare) == transpile(word)
+
+
+GRID_PLAIN = [
+    "  for a, b in g\n    k += a + b\n  k\n",
+    "  g.sort()\n  len(g) + k\n",
+    "  t = 0\n  for >i in g\n    for >j in g[i]\n      t += g[i][j] + g[i - 1][0]\n  t\n",
+    "  lo, hi = 0, len(g) - 1\n  mid = (lo + hi) // 2\n  g[mid][k] + g[-1][0]\n",
+    "  g[k][0] = 1\n  sum(g[0][1:])\n",
+]
+GRID_WRAPPED = [
+    "  g[0, 0]\n",
+    "  p = (0, 0)\n  g[p]\n",
+    "  for p in pairs(g)\n    k += g[p]\n  k\n",
+    "  h = g\n  h[0][0]\n",
+    "  x = k if k else (0, 0)\n  g[x]\n",
+    "  for x in other\n    k += g[x]\n  k\n",
+]
+
+
+@pytest.mark.parametrize("body", GRID_PLAIN)
+def test_a_grid_parameter_indexed_by_integers_alone_is_not_wrapped(body):
+    py = transpile("def f(g: [[int]], k: int) -> int\n" + body)
+    assert "Grid" not in py and "try:" not in py and "_in_g" not in py
+
+
+@pytest.mark.parametrize("body", GRID_WRAPPED)
+def test_a_grid_parameter_that_may_take_a_pair_is_wrapped(body):
+    py = transpile("def f(g: [[int]], k: int, other: [(int, int)]) -> int\n" + body)
+    assert "class Grid(list):" in py and "_in_g, g = g, Grid(g)" in py
+
+
+def test_only_the_grid_indexed_by_a_pair_is_wrapped_and_lean_off_wraps_each():
+    src = "def f(a: [[int]], b: [[int]]) -> int\n  a[0][0] + b[0, 0]\n"
+    py = transpile(src)
+    assert "Grid(b)" in py and "Grid(a)" not in py
+    assert "Grid(a)" in transpile(src, lean=False)
+    # an in-place sort reaches the caller's list with and without the wrapper
+    for body in ("  g.sort()\n  g[0][0]\n", "  g.sort()\n  g[0, 0]\n"):
+        g = [[3], [1]]
+        assert run("def f(g: [[int]]) -> int\n" + body, g) == 1 and g == [[1], [3]]

@@ -1,11 +1,13 @@
 """mu FILE|- [ARG...]   run the file, ARGs in sys.argv
 mu --py FILE|-       the Python
+mu --mu FILE|-       a Python file with a class Solution, as mu
 mu --fmt FILE|-      the file, formatted
 mu --version
 Also python -m mulang."""
 
 import ast
 import linecache
+import re
 import sys
 import traceback
 import types
@@ -75,7 +77,7 @@ def main(args):
         sys.exit(print(f"mu {VERSION}"))
     if not args or args[0] in ("-h", "--help"):
         sys.exit(print(__doc__))
-    mode = args[0] if args[0] in ("--py", "--fmt") else None
+    mode = args[0] if args[0] in ("--py", "--mu", "--fmt") else None
     if mode:
         args = args[1:]
         if len(args) != 1:
@@ -86,6 +88,14 @@ def main(args):
         if mode == "--fmt":
             return sys.stdout.write(fmt(src))
         profile()
+        if mode == "--mu":
+            from . import py2mu
+
+            entries = sorted(set(re.findall(r"\bsol\.(\w+)\(", src)))
+            try:
+                return sys.stdout.write(py2mu.translate(src, entries or None))
+            except py2mu.Untranslatable as err:
+                sys.exit(f"{name}: {err}")
         if mode == "--py":
             return sys.stdout.write(transpile(src, path=None if name == "-" else name))
         run(src, "<stdin>" if name == "-" else name, rest)
