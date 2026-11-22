@@ -22,7 +22,21 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from . import HELPERS, MuError, Parser, difftest, fmt, mu_type, profile, transpile
+from . import (
+    HELPERS,
+    WIDTH,
+    MuError,
+    Parser,
+    computed,
+    difftest,
+    fmt,
+    free_names,
+    global_names,
+    guard_colon,
+    mu_type,
+    profile,
+    transpile,
+)
 from .idioms import FoldBlock, Rules
 
 # the cached problems of the project: <num>.json, each with "solution"
@@ -309,6 +323,7 @@ class Printer:
 
     def __init__(self):
         self.no_fold = 0  # inside a comprehension element: no bare fold
+        self.fns = []  # the defs around the statement being written
 
     # expressions
 
@@ -774,10 +789,74 @@ class Printer:
             if not isinstance(s, (ast.Pass, ast.Nonlocal))
             and not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
         ]
+        side = self.value_side(stmts[-2:], ind) if tail else None
+        if side:
+            stmts = stmts[:-2]
         for k, s in enumerate(stmts):
-            last = tail and k == len(stmts) - 1
+            last = tail and not side and k == len(stmts) - 1
             out += self.stmt(s, ind, last)
-        return out or ["  " * ind + "pass"]
+        return out + [side] * bool(side) or ["  " * ind + "pass"]
+
+    def value_side(self, stmts, ind):
+        """`s, t = f(i + 1)` then `return max(s, t), nums[i] + s`, the
+        last two lines of a body, as one line: the pair is a value side of
+        `=`, `(max(s, t), nums[i] + s) = f(i + 1)`. The names are new and
+        the pair reads them in the order of the targets; when it does not,
+        the targets stay in the line and state the order, `(...) = s, t =
+        f(i + 1)`. None when the two lines are not of this form."""
+        if len(stmts) != 2:
+            return None
+        assign, ret = stmts
+        if not (
+            isinstance(assign, ast.Assign)
+            and len(assign.targets) == 1
+            and isinstance(assign.targets[0], ast.Tuple)
+            and all(isinstance(e, ast.Name) for e in assign.targets[0].elts)
+            and not isinstance(assign.value, ast.Lambda)
+            and isinstance(ret, ast.Return)
+            and isinstance(ret.value, ast.Tuple)
+        ):
+            return None
+        names = [e.id for e in assign.targets[0].elts]
+        py = ast.unparse(ret.value)
+        read = free_names(py)
+        if len(set(names)) != len(names) or not computed(py) or not set(names) & set(read):
+            return None
+        pair = f"({self.bare(ret.value)})"
+        rhs = self.value(assign.value)
+        short = [n for n in read if n in names] == names and not (
+            set(names) & self.bound_before(assign)
+        )
+        mid = "" if short else f"{', '.join(names)} = "
+        return f"{'  ' * ind}{pair} = {mid}{rhs}"
+
+    def bound_before(self, assign):
+        """The names mu may count as bound when it reads this assignment:
+        its own, those of the defs around it, and what the def that holds
+        the assignment binds in another statement."""
+        out = global_names()
+        for fn in self.fns[:-1]:
+            out |= mu_bound(fn)
+        if self.fns:
+            fn = self.fns[-1]
+            out |= {a.arg for a in fn.args.args}
+            for n in own_nodes(fn.body):
+                if n is assign:
+                    continue
+                if isinstance(n, ast.Assign):
+                    for t in n.targets:
+                        out |= target_names(t)
+                elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.For)):
+                    out |= target_names(n.target)
+                elif isinstance(n, ast.FunctionDef):
+                    out.add(n.name)
+                elif isinstance(n, (ast.comprehension, ast.NamedExpr)):
+                    out |= target_names(n.target)
+                elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                    out |= target_names(n.optional_vars)
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    out.add(n.name)
+        return out
 
     def stmt(self, s, ind, last):
         pad = "  " * ind
@@ -916,11 +995,45 @@ class Printer:
                 return above + memo
         ret = mu_type(fn.returns) if typed else None
         if cached:  # a body the case form cannot say: memo's block form
-            head = f"{pad}memo {fn.name}({self.params(fn, False)})"
+            head, ret = f"{pad}memo {fn.name}({self.params(fn, False)})", None
         else:
             head = f"{pad}def {fn.name}({self.params(fn, typed)})"
-            head += f" -> {ret}" if ret else ""
-        return above + [head] + self.block(fn.body, ind + 1, tail=True)
+        self.fns.append(fn)
+        try:
+            guard, body = self.head_guard(fn.body)
+            after = ", ".join(x for x in (ret, guard) if x)
+            if guard and len(f"{head} -> {after}") > WIDTH:
+                guard, body, after = None, fn.body, ret
+            head += f" -> {after}" if after else ""
+            return above + [head] + self.block(body, ind + 1, tail=True)
+        finally:
+            self.fns.pop()
+
+    def head_guard(self, body):
+        """(`guard: value`, the rest of the body) when the body starts with
+        `if guard: return value` and has more lines: the base case goes in
+        the head. (None, body) when it does not."""
+        idle = (ast.Pass, ast.Nonlocal)
+        k = 0
+        while k < len(body) and (
+            isinstance(body[k], idle)
+            or (isinstance(body[k], ast.Expr) and isinstance(body[k].value, ast.Constant))
+        ):
+            k += 1
+        s = body[k] if k < len(body) else None
+        if not (
+            isinstance(s, ast.If)
+            and not s.orelse
+            and len(s.body) == 1
+            and isinstance(s.body[0], ast.Return)
+            and s.body[0].value is not None
+            and any(not isinstance(x, idle) for x in body[k + 1 :])
+        ):
+            return None, body
+        guard = self.top(s.test)
+        if guard_colon(guard, 0):  # a fold's own `:` would end the guard
+            guard = f"({guard})"
+        return f"{guard}: {self.bare(s.body[0].value)}", body[:k] + body[k + 1 :]
 
     def is_cache(self, d):
         if isinstance(d, ast.Call):

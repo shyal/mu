@@ -539,3 +539,63 @@ def test_a_cached_function_of_cases_ends_in_a_bare_guard():
     assert "      |        -> i == n - 1 ? nums[i] * s : nums[i] * s + max(" in got
     assert "else" not in got
     runs(got, "f([1, 2, 3], 3)", 3)
+
+
+def test_a_base_case_goes_in_the_head_and_a_pair_is_a_value_side():
+    got = mu_of(
+        """
+        n = len(nums)
+        def f(i):
+            if i == n:
+                return 0, 0
+            s, t = f(i + 1)
+            return max(s, t), nums[i] + s
+        return max(f(0))
+        """,
+        sig="f(self, nums: List[int]) -> int",
+    )
+    assert "    def f(i) -> i == n: 0, 0\n" in got
+    assert "      (max(s, t), nums[i] + s) = f(i + 1)\n" in got
+    runs(got, "f([2, 7, 9, 3, 1])", 12)
+
+
+def test_a_pair_that_reads_its_names_in_another_order_keeps_the_targets():
+    got = mu_of(
+        """
+        n = len(nums)
+        def f(i):
+            if i == n:
+                return 0, 0
+            s, t = f(i + 1)
+            return max(t, s), nums[i] + s
+        return max(f(0))
+        """,
+        sig="f(self, nums: List[int]) -> int",
+    )
+    assert "      (max(t, s), nums[i] + s) = s, t = f(i + 1)\n" in got
+    runs(got, "f([2, 7, 9, 3, 1])", 12)
+
+
+def test_a_head_guard_follows_the_return_type_and_a_lone_if_stays_a_body():
+    got = mu_of(
+        """
+        if not nums:
+            return 0
+        out = []
+        while len(out) < 2:
+            out.append(nums[0])
+        return out[0] + out[1]
+        """,
+        sig="f(self, nums: List[int]) -> int",
+    )
+    assert "  def f(nums: [int]) -> int, not nums: 0\n" in got
+    runs(got, "f([3, 2])", 6)
+    runs(got, "f([])", 0)
+    alone = mu_of(
+        """
+        if not nums:
+            return 0
+        """,
+        sig="f(self, nums: List[int]) -> int",
+    )
+    assert "  def f(nums: [int]) -> int\n    if not nums\n" in alone
