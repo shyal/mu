@@ -2,7 +2,7 @@
 versions of the same solve, each folded in <details><summary>Label</summary>,
 so GitHub shows them on a click. On the docs site the versions become tabs
 of the solve. The first block, the unfolded one, is the first tab: mu +
-pydsa on both sites."""
+pydsa when a fold is named mu, and mu when no fold is."""
 
 import re
 from functools import partial
@@ -20,11 +20,12 @@ def indent(block):
 
 
 def tabs(first, m):
+    folds = re.findall(FOLD, m.group(2))
+    # a solve with no mu fold has no library version: its first block is mu
+    if all(name != "mu" for name, _ in folds):
+        first = "mu"
     parts = [f'===! "{first}"\n\n{indent(m.group(1))}']
-    parts += [
-        f'=== "{name}"\n\n{indent(block)}'
-        for name, block in re.findall(FOLD, m.group(2))
-    ]
+    parts += [f'=== "{name}"\n\n{indent(block)}' for name, block in folds]
     return "\n\n".join(parts)
 
 

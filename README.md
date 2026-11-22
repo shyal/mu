@@ -15,44 +15,137 @@
   </picture>
 </p>
 
-The name is the word 無 (Japanese *mu*, Chinese *wú*). It means "no",
-"not", "without". The oldest forms of the character show a dancer with
-long sleeves or tassels in each hand, and the character meant "dance".
-Writers then borrowed it for the negative, which had the same sound. In
-Chan and Zen Buddhism, mu is also pure awareness, before experience or
-knowledge.
+[mu](https://www.shyal.com/mu/) is named after 無 (Japanese mu, Chinese wú). It means "no", "not",
+"without". In Chan and Zen Buddhism, mu is also pure awareness, before
+experience or knowledge.
 
-The syntax of mu comes from the negative: no colons, no brackets around
-one argument, no imports. The text that remains is the algorithm.
-
-Documentation: [www.shyal.com/mu](https://www.shyal.com/mu/)
-
-mu is a small language that transpiles to Python. A file is indented
-blocks without colons, calls of one argument without brackets, `..`
-ranges, `x -> ...` lambdas, `{x -> ...}` block lambdas that recurse as
-`mu`, `<-` push, folds (`sum for x in xs: f(x)`, `count odd in xs`),
-`memo` for a cached function with cases or a cached block lambda, and `class` for a Python class.
-The Python it produces is plain and runs anywhere; the transpiler pastes
-in the source of every helper the file calls.
-
-```
-pip install mu-language
-mu file.mu        # run the file
-mu --py file.mu   # the Python
-mu --fmt file.mu  # the file, formatted
-mu-repl           # a REPL
-```
+mu's sole purpose is to strip away as much boilerplate as possible, so
+that solutions can be expressed as close as possible to their
+mathematical form, such as a recurrence.
 
 ## Solves
 
-Each solve has three tabs: mu, mu + pydsa and python. The first two are
-complete mu files. The mu + pydsa version calls
-[pydsa](https://www.shyal.com/pydsa/) helpers by name, with no import. The
-profile in [Profiles](#profiles) registers them. The python tab gives the
-same solve in plain Python, for comparison. In both mu versions, the
-Python that `mu --py file.mu` prints
-imports only the standard library, because mu pastes in the source of each
-helper that the file calls.
+We'll begin by letting the langage speak for itself, by presenting mu + [pydsa](https://www.shyal.com/pydsa/) vs. mu vs. python.
+
+```mu
+# 509. Fibonacci Number
+class Solution
+  def fib(n: int) -> int, n < 2: n
+    self.fib(n - 1) + self.fib(n - 2)
+```
+
+<details><summary>python</summary>
+
+```python
+# 509. Fibonacci Number
+class Solution:
+    def fib(self, n: int) -> int:
+        if n < 2:
+            return n
+        return self.fib(n - 1) + self.fib(n - 2)
+```
+
+</details>
+
+```mu
+# 104. Maximum Depth of Binary Tree
+class Solution
+  def maxDepth(root: TreeNode?) -> int, not root: 0
+    1 + max(self.maxDepth(root.left), self.maxDepth(root.right))
+```
+
+<details><summary>python</summary>
+
+```python
+# 104. Maximum Depth of Binary Tree
+class Solution:
+    def maxDepth(self, root: Optional[TreeNode]) -> int:
+        if not root:
+            return 0
+        return 1 + max(self.maxDepth(root.left), self.maxDepth(root.right))
+```
+
+</details>
+
+```mu
+# 70. Climbing Stairs
+class Solution
+  def climbStairs(n: int) -> int
+    memo f(i) -> i >= n: int(i == n)
+      f(i + 1) + f(i + 2)
+    f(0)
+```
+
+<details><summary>python</summary>
+
+```python
+# 70. Climbing Stairs
+class Solution:
+    def climbStairs(self, n: int) -> int:
+        @cache
+        def f(i):
+            if i >= n:
+                return int(i == n)
+            return f(i + 1) + f(i + 2)
+        return f(0)
+```
+
+</details>
+
+```mu
+# 198. House Robber
+class Solution
+  def rob(nums: [int]) -> int
+    n = len nums
+    max({
+      i -> i == n: 0, 0
+        (max(s, t), nums[i] + s) = mu(i + 1)
+    }(0))
+```
+
+<details><summary>python</summary>
+
+```python
+# 198. House Robber
+class Solution:
+    def rob(self, nums: list[int]) -> int:
+        n = len(nums)
+        def _mu1(i):
+            if i == n:
+                return 0, 0
+            s, t = _mu1(i + 1)
+            return (max(s, t), nums[i] + s)
+        return max(_mu1(0))
+```
+
+</details>
+
+```mu
+# 337. House Robber III
+class Solution
+  def rob(root: TreeNode?) -> int
+    max({
+      n -> not n: 0, 0
+        (ls, lt), (rs, rt) = mu(n.left), mu(n.right)
+        max(ls, lt) + max(rs, rt), n.val + ls + rs
+    }(root))
+```
+
+<details><summary>python</summary>
+
+```python
+# 337. House Robber III
+class Solution:
+    def rob(self, root: Optional[TreeNode]) -> int:
+        def _mu1(n):
+            if not n:
+                return 0, 0
+            (ls, lt), (rs, rt) = _mu1(n.left), _mu1(n.right)
+            return max(ls, lt) + max(rs, rt), n.val + ls + rs
+        return max(_mu1(root))
+```
+
+</details>
 
 ```mu
 # 53. Maximum Subarray (Kadane's algorithm)
@@ -1229,6 +1322,16 @@ class Solution:
 ```
 
 </details>
+
+## Installation and use
+
+```
+pip install mu-language
+mu file.mu        # run the file
+mu --py file.mu   # the Python
+mu --fmt file.mu  # the file, formatted
+mu-repl           # a REPL
+```
 
 ## Spec
 
