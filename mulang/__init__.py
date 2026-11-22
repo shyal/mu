@@ -28,7 +28,7 @@ import textwrap
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.18"
+VERSION = "0.19"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that stay Python's `is`, the identity test, on the right of `is`
@@ -132,20 +132,120 @@ HEAD = r"(?:->|[A-Za-z_]\w*\s*->|\((?:\s*[A-Za-z_]\w*\s*,)*\s*(?:[A-Za-z_]\w*\s*
 BLOCK_HEAD = re.compile(rf"\s*{HEAD}\s*(?:#.*)?$")  # `{p ->` ends the line
 HEAD_LINE = re.compile(rf"^\s*{HEAD}\s*(?:#.*)?$")  # a line that is a head
 BLANK = re.compile(r"\s*(?:#.*)?$")  # nothing, or a comment
+HEAD_START = re.compile(rf"\s*{HEAD}")  # a head, and more on its line
 
 
 def opens_block(line, pos, lines, k):
     """Whether the `{` just read at line[pos - 1] opens a block: the lambda
-    head ends its line, `{p ->`, or the `{` ends the line and the next line
-    of code is the head."""
-    if BLOCK_HEAD.match(line, pos):
+    head ends its line, `{p ->` or `{p -> guard: value`, or the `{` ends
+    the line and the next line of code is the head."""
+    if BLOCK_HEAD.match(line, pos) or guard_head(lines, k, pos):
         return True
     if not BLANK.match(line, pos):
         return False
+    for j in range(k + 1, len(lines)):
+        nxt = lines[j]
+        if nxt.strip() and not nxt.lstrip().startswith("#"):
+            return bool(HEAD_LINE.match(nxt)) or guard_head(lines, j, 0)
+    return False
+
+
+def deeper_next(lines, k):
+    """Whether the next line of code after line k is indented more than
+    line k is: line k is the head of a block."""
+    ind = len(lines[k]) - len(lines[k].lstrip(" "))
     for nxt in lines[k + 1 :]:
         if nxt.strip() and not nxt.lstrip().startswith("#"):
-            return bool(HEAD_LINE.match(nxt))
+            return len(nxt) - len(nxt.lstrip(" ")) > ind
     return False
+
+
+def guard_colon(line, pos):
+    """Whether line[pos:] has the `:` of a head guard, `guard: value`: a
+    `:` outside brackets that answers no `?`, with every bracket of the
+    line closed."""
+    depth, asks, found = 0, 0, False
+    while pos < len(line):
+        m = TOKEN.match(line, pos)
+        if not m or m.lastgroup == "comment":
+            break
+        pos = m.end()
+        val = m.group()
+        if m.lastgroup != "op":
+            continue
+        if val in "([{":
+            depth += 1
+        elif val in ")]}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif depth == 0 and val == "?":
+            asks += 1
+        elif depth == 0 and val == ":":
+            found, asks = found or not asks, max(asks - 1, 0)
+    return found and depth == 0
+
+
+def guard_head(lines, k, pos):
+    """Whether lines[k][pos:] is the head of a block lambda with a guard,
+    `p -> guard: value`, and the body is under it."""
+    m = HEAD_START.match(lines[k], pos)
+    return bool(m) and guard_colon(lines[k], m.end()) and deeper_next(lines, k)
+
+
+class Brackets(list):
+    """The open brackets of a program, innermost last, over the indents of
+    its open blocks. A bracket is its character. A brace that opens a block
+    is (depth, floor, keep, n): the count of brackets open around it, the
+    count of indents open before it, that count with the indent of its own
+    line, and the number of that line. Under that brace lines are marked by indentation again, so
+    the count of brackets restarts at 0 there and comes back at its `}`.
+    The `}` stands at the indent of the line that holds the `{`, whether
+    that line starts a statement or continues one inside brackets."""
+
+    def __init__(self, indents):
+        super().__init__()
+        self.indents = indents
+
+    def block(self, line, depth, n):
+        """Open a block at a `{` on this line, line n; the depth under
+        it, 0."""
+        floor = len(self.indents)
+        ind = len(line) - len(line.lstrip(" "))
+        if ind != self.indents[-1]:
+            self.indents.append(ind)  # the line continues a statement
+        self.append((depth, floor, len(self.indents), n))
+        return 0
+
+    def leave(self, n):
+        """Close the innermost indent, for line n, which stands left of
+        it. No line stands left of the brace of the block it is in."""
+        if self and len(self.indents) <= self[-1][2]:
+            raise MuError(f"line {n}: this line of a block starts left of line {self[-1][3]}, which opens the block")
+        self.indents.pop()
+
+    def mismatch(self, body):
+        """The message for a line, body, at an indent no open block has."""
+        if self and body.startswith("}"):
+            return close_at(self[-1][3])
+        return "indentation does not match any block"
+
+    def close(self, depth, n):
+        """Close the innermost bracket; the depth after it."""
+        top = self.pop() if self else ""
+        if not isinstance(top, tuple):
+            return depth - 1
+        outer, floor, keep, opened = top
+        if len(self.indents) != keep:
+            raise MuError(f"line {n}: {close_at(opened)}")
+        del self.indents[floor:]
+        return outer
+
+
+def close_at(n):
+    """The message for a `}` that is not under the start of line n, the
+    line that opens its block."""
+    return f"put this }} on a line of its own, under the first character of line {n}, which opens the block"
 
 
 class Col(str):
@@ -161,9 +261,10 @@ def tokenize(src, primes=frozenset()):
     of the name is in primes: the parser asks for that when the name is
     bound. Inside brackets lines run on, except after a `{` that ends its
     line as a lambda head, `{p ->`: that brace opens a block, and the lines
-    under it are marked like any other."""
+    under it are marked like any other, whatever brackets are open around
+    the brace. The brackets go back to running lines on at its `}`."""
     toks, indents, depth = [], [0], 0
-    stack = []  # each open bracket; "B" for a brace that opens a block
+    stack = Brackets(indents)
     lines, k = src.splitlines(), -1
     while k + 1 < len(lines):
         k += 1
@@ -177,10 +278,10 @@ def tokenize(src, primes=frozenset()):
                 indents.append(ind)
                 toks.append(("INDENT", "", n))
             while ind < indents[-1]:
-                indents.pop()
+                stack.leave(n)
                 toks.append(("DEDENT", "", n))
             if ind != indents[-1]:
-                raise MuError(f"line {n}: indentation does not match any block")
+                raise MuError(f"line {n}: {stack.mismatch(body)}")
         pos = 0
         while pos < len(line):
             long = triple(lines, k, pos)
@@ -203,13 +304,12 @@ def tokenize(src, primes=frozenset()):
             val.col = start
             if val in "([{":
                 if val == "{" and opens_block(line, pos, lines, k):
-                    stack.append("B")
+                    depth = stack.block(line, depth, n)
                 else:
                     depth += 1
                     stack.append(val)
             elif val in ")]}":
-                if not (stack and stack.pop() == "B"):
-                    depth -= 1
+                depth = stack.close(depth, n)
             toks.append((kind.upper(), val, n))
         if depth == 0 and toks and toks[-1][0] not in ("NEWLINE", "INDENT", "DEDENT"):
             toks.append(("NEWLINE", "", n))
@@ -1292,12 +1392,17 @@ class Parser:
                         f"line {line}: `{name}'` marks a name bound again,"
                         f" but {name} is not bound yet"
                     )
-            names = [n for n in free_names(side) if n not in seen or n in marked]
-            if not names:
+            # a target on its right binds its names: `a * b = a, b = pair`
+            given = targets(" = ".join(waiting))
+            names = [
+                n for n in free_names(side)
+                if (n not in seen and n not in given) or n in marked
+            ]
+            if not names and not given.intersection(free_names(side)):
                 read = ", ".join(free_names(side))
                 why = f"{read} already defined" if read else "it names nothing"
                 raise MuError(f"line {line}: `{side}` binds no new name: {why}")
-            lhs = " = ".join(waiting + [", ".join(names)])
+            lhs = " = ".join(waiting + [", ".join(names)] * bool(names))
             out.append(("assign", Py(lhs), "=", val))
             self.known[-1] |= targets(" = ".join(waiting))
             waiting, val = [], side
@@ -1344,13 +1449,21 @@ class Parser:
             if not self.at(")"):
                 self.expect(",")
         self.expect(")")
-        ret = None
-        if self.at("->"):
-            self.next()
-            ret = self.type()
+        ret, guard = None, None
         self.known[-1].add(name)
         self.known.append({p for p, _ in params})
-        body = self.block()
+        if self.at("->"):
+            self.next()
+            # a bare `->` ends the head: no type and no guard
+            bare = self.peek()[0] == "NEWLINE"
+            ahead = None if bare else self.guard_ahead()
+            if ahead != "guard" and not bare:
+                ret = self.type()
+            if ahead == "typed":
+                self.expect(",")
+            if ahead:
+                guard = self.guard()
+        body = guarded(guard, self.block())
         self.known.pop()
         if len([s for s in body if ret_name([s])]) > 1:
             raise MuError(f"{name} has more than one ret line")
@@ -1404,7 +1517,12 @@ class Parser:
         self.known[-1].add(name)
         if not self.at("="):  # block form: a def, cached
             self.known.append(set(params))
-            body = self.block()
+            guard = None
+            if self.at("->"):
+                self.next()
+                if self.peek()[0] != "NEWLINE":  # a bare `->` ends the head
+                    guard = self.guard()
+            body = guarded(guard, self.block())
             self.known.pop()
             if any(ret_name([s]) for s in body):
                 raise MuError(f"memo {name} cannot have a ret line")
@@ -1420,6 +1538,56 @@ class Parser:
         cases = self.cases()
         self.expect_kind("DEDENT")
         return ("memo", name, params, cases)
+
+    def guard_ahead(self):
+        """What follows the `->` of a head, when the head has a guard and
+        a block under it: "guard" for `guard: value`, "typed" for `T, guard:
+        value`, a return type first. None for a head with no guard: no `:`
+        outside brackets that answers no `?`, or no block under the line,
+        as in `def f(x) -> int: return x`."""
+        j, depth, asks, comma = self.i, 0, 0, False
+        while True:
+            kind, val = self.toks[j][:2]
+            if kind == "EOF" or (depth == 0 and kind == "NEWLINE"):
+                return None
+            if kind == "OP" and val in "([{":
+                depth += 1
+            elif kind == "OP" and val in ")]}":
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif kind == "OP" and depth == 0 and val == "?":
+                # `int?` ends a type; any other `?` asks for a `:`
+                asks += self.toks[j + 1][1] not in TYPE_AFTER_Q
+            elif kind == "OP" and depth == 0 and val == ",":
+                comma = True
+            elif kind == "OP" and depth == 0 and val == ":":
+                if not asks:
+                    break
+                asks -= 1
+            j += 1
+        while not (depth == 0 and self.toks[j][0] == "NEWLINE"):
+            kind, val = self.toks[j][:2]
+            if kind == "EOF":
+                return None
+            depth += kind == "OP" and val in "([{"
+            depth -= kind == "OP" and val in ")]}"
+            if depth < 0:
+                return None
+            j += 1
+        if self.toks[j + 1][0] != "INDENT":
+            return None
+        return "typed" if comma else "guard"
+
+    def guard(self):
+        """`guard: value` in a head: the function returns the value when
+        the guard holds, and runs its body when it does not."""
+        line = self.peek()[2]
+        guard = self.expr()
+        self.expect(":")
+        if self.peek()[0] == "NEWLINE":
+            raise MuError(f"line {line}: a guard in a head needs a value: `guard: value`")
+        return ("if", [(guard, [("return", self.exprlist())])], None)
 
     def cases(self):
         """`| guard -> value` lines, one case each; `| ->`, no guard, and
@@ -2138,6 +2306,9 @@ class Parser:
         name.hidden = True
         self.mu.append(name)
         self.known.append(set(names))
+        guard = None
+        if self.peek()[0] != "NEWLINE" and self.guard_ahead():
+            guard = self.guard()
         if self.peek()[0] == "NEWLINE":
             self.next()
             self.expect_kind("INDENT")
@@ -2152,6 +2323,7 @@ class Parser:
             while self.peek()[0] != "DEDENT":
                 body += flat(self.stmt())
             self.next()
+            body = guarded(guard, body)
         else:
             body = [("expr", self.body())]
         if deep:
@@ -2638,7 +2810,22 @@ def computed(side, seen=None):
         while isinstance(node, (ast.Subscript, ast.Attribute)):
             node = node.value
         return isinstance(node, ast.Name) and node.id not in seen
+    if isinstance(node, (ast.Tuple, ast.List)):
+        # `max(s, t), nums[i] + s` is a value; `int(a), b` is two targets
+        return any(not isinstance(e, TARGETS) and not conversion(e) for e in node.elts)
     return not isinstance(node, TARGETS)
+
+
+def conversion(node):
+    """Whether an item of a target list is a name in a one-argument
+    function, `int(a)`: the name is assigned, then converted."""
+    return (
+        isinstance(node, ast.Call)
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and CONVERT.fullmatch(ast.unparse(node)) is not None
+    )
 
 
 def free_names(side):
@@ -2779,6 +2966,15 @@ def bound(stmts, params=False):
         for body in children(s):
             out |= bound(body, params)
     return out
+
+
+def guarded(guard, body):
+    """The body of a function whose head has a guard: the guard is its
+    first statement, after a docstring."""
+    if guard is None:
+        return body
+    doc = len(body) > 1 and body[0][0] == "expr" and bool(DOC.match(body[0][1]))
+    return body[:doc] + [guard] + body[doc:]
 
 
 def is_memo(s):
@@ -3647,7 +3843,12 @@ def fmt(src):
     fmt(fmt(s)) == fmt(s)."""
     lines, indents, buf, depth, blank, level = [], [0], [], 0, False, 0
     in_class = False  # the current top-level block is a class
-    stack = []  # each open bracket; "B" for a brace that opens a block
+    stack = Brackets(indents)
+    # for each open block brace, what its lines add to the count of open
+    # indents to get their level: the brace may stand on a line that
+    # continues a statement, and that line is joined to the one above or
+    # is indented one step per open bracket
+    shifts = []
     rows, k = src.splitlines(), -1
     while k + 1 < len(rows):
         k += 1
@@ -3661,20 +3862,22 @@ def fmt(src):
             if body.startswith("#"):
                 # a comment opening a block sits one level in
                 level = sum(1 for d in indents[1:] if d <= ind) + (ind > indents[-1])
+                level += shifts[-1] if shifts else 0
             else:
                 if ind > indents[-1]:
                     indents.append(ind)
                 while ind < indents[-1]:
-                    indents.pop()
+                    stack.leave(n)
                 if ind != indents[-1]:
-                    raise MuError(f"line {n}: indentation does not match any block")
-                level = len(indents) - 1
+                    raise MuError(f"line {n}: {stack.mismatch(body)}")
+                level = len(indents) - 1 + (shifts[-1] if shifts else 0)
             if level == 0 and not body.startswith(("#", "@")):
                 in_class = body.startswith("class ")
             if lines and (blank or set_apart(lines[-1], level, body, in_class)):
                 lines.append(None)
             blank = False
         pos, glue = 0, -1  # glue: where a number just ended
+        opens = False  # a block brace opens on this line
         while pos < len(line):
             long = triple(rows, k, pos)
             if long:
@@ -3691,13 +3894,14 @@ def fmt(src):
             val = m.group()
             if m.lastgroup == "op" and val in "([{":
                 if val == "{" and opens_block(line, pos, rows, k):
-                    stack.append("B")  # `{p ->` opens a block: its lines stay
+                    depth, opens = stack.block(line, depth, n), True  # its lines stay
                 else:
                     depth += 1
                     stack.append(val)
             elif m.lastgroup == "op" and val in ")]}":
-                if not (stack and stack.pop() == "B"):
-                    depth -= 1
+                if stack and isinstance(stack[-1], tuple):
+                    shifts.pop()
+                depth = stack.close(depth, n)
             if m.lastgroup == "name" and buf and buf[-1][0] == "NUM" and glue == m.start():
                 buf[-1] = ("NUM", buf[-1][1] + val)  # `2x` stays one token
                 continue
@@ -3711,6 +3915,12 @@ def fmt(src):
                 head, buf = split_inline(buf)
                 lines.append((at, render(kept_breaks(head, at), at)))
                 at += 1
+            if opens:  # the level of the line that holds the brace, plus one
+                at, text = lines[-1]
+                if "\n" in text:
+                    last = text.rsplit("\n", 1)[1]
+                    at = (len(last) - len(last.lstrip(" "))) // 2
+                shifts.append(at + 1 - stack[-1][2])
     if depth:
         raise MuError("unclosed bracket at end of file")
     lines = align_cases(lines)

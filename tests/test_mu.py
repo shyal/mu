@@ -2032,3 +2032,234 @@ def test_only_the_grid_indexed_by_a_pair_is_wrapped_and_lean_off_wraps_each():
     for body in ("  g.sort()\n  g[0][0]\n", "  g.sort()\n  g[0, 0]\n"):
         g = [[3], [1]]
         assert run("def f(g: [[int]]) -> int\n" + body, g) == 1 and g == [[1], [3]]
+
+
+IN_BRACKETS = (
+    "def fib(n: int) -> int\n"
+    "  max(0, {k ->\n"
+    "    if k < 2\n"
+    "      return k\n"
+    "    mu(k - 1) + mu(k - 2)\n"
+    "  }(n), 1)\n"
+    "\n"
+    "def parts(n: int) -> {str: [int]}\n"
+    "  {\"fib\": [n, memo {\n"
+    "    k ->\n"
+    "      | k < 2 -> k\n"
+    "      |       -> mu(k - 1) + mu(k - 2)\n"
+    "  }(n)], \"depth\": [{k ->\n"
+    "    max([{j ->\n"
+    "      j ? mu(j - 1) : 0\n"
+    "    }(k), k])\n"
+    "  }(n)]}\n"
+)
+
+
+def test_a_block_lambda_is_a_block_inside_any_bracket():
+    """Inside `(`, `[` and `{` lines run on, but under a block brace they
+    are marked by indentation again, and run on again after its `}`."""
+    ns: dict = {}
+    exec(transpile(IN_BRACKETS), ns)
+    assert ns["fib"](10) == 55
+    assert ns["parts"](10) == {"fib": [10, 55], "depth": [10]}
+    assert fmt(IN_BRACKETS) == IN_BRACKETS
+
+
+def test_a_block_brace_on_a_line_that_continues_a_statement():
+    """The `}` stands at the indent of the line that holds the `{`. The
+    formatter joins that line to the one above when the two fit, and the
+    block moves with it."""
+    src = (
+        "def fib(n: int) -> [int]\n"
+        "  [0,\n"
+        "       {k ->\n"
+        "         if k < 2\n"
+        "           return k\n"
+        "         # the two before it\n"
+        "         mu(k - 1) + mu(k - 2)\n"
+        "       }(n),\n"
+        "   1]\n"
+    )
+    joined = (
+        "def fib(n: int) -> [int]\n"
+        "  [0, {k ->\n"
+        "    if k < 2\n"
+        "      return k\n"
+        "    # the two before it\n"
+        "    mu(k - 1) + mu(k - 2)\n"
+        "  }(n), 1]\n"
+    )
+    for text in (src, joined):
+        ns: dict = {}
+        exec(transpile(text), ns)
+        assert ns["fib"](10) == [0, 55, 1]
+    assert fmt(src) == joined and fmt(joined) == joined
+    word = "x" * 80
+    long = src.replace("[0,", f'["{word}",')
+    kept = fmt(long)
+    assert kept.splitlines()[1:3] == [f'  ["{word}",', "    {k ->"]
+    assert kept.splitlines()[7] == "    }(n), 1]" and fmt(kept) == kept
+    ns = {}
+    exec(transpile(kept), ns)
+    assert ns["fib"](10) == [word, 55, 1]
+
+
+@pytest.mark.parametrize(
+    "src, message",
+    [
+        (
+            "def f(n: int) -> int\n  max({\n    k ->\n      k\n    }(n), 0)\n",
+            "line 5: put this } on a line of its own, under the first character of line 2, which opens the block",
+        ),
+        (
+            "def f(n: int) -> int\n  max({k ->\n      k\n   }(n), 0)\n",
+            "line 4: put this } on a line of its own, under the first character of line 2, which opens the block",
+        ),
+        (
+            "def f(n: int) -> int\n  x = {k ->\n    k }(n)\n",
+            "line 3: put this } on a line of its own, under the first character of line 2, which opens the block",
+        ),
+        (
+            "def f(n: int) -> int\n  max(0,\n      {k ->\n    k\n      }(n))\n",
+            "line 4: this line of a block starts left of line 3, which opens the block",
+        ),
+    ],
+)
+def test_a_block_brace_closes_at_the_indent_of_its_line(src, message):
+    with pytest.raises(MuError, match=re.escape(message)):
+        transpile(src)
+    with pytest.raises(MuError, match=re.escape(message)):
+        fmt(src)
+
+
+
+def test_a_guard_in_the_head_of_a_block_lambda_returns_its_value():
+    src = (
+        "def rob(nums: [int]) -> int\n"
+        "  n = len nums\n"
+        "  max({\n"
+        "    i -> i == n: 0, 0\n"
+        "      s, t = mu(i + 1)\n"
+        "      max(s, t), nums[i] + s\n"
+        "  }(0))\n"
+    )
+    out = transpile(src)
+    assert "    def _mu1(i):\n        if i == n:\n            return 0, 0\n        s, t = _mu1(i + 1)\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["rob"]([2, 7, 9, 3, 1]) == 12
+    assert ns["rob"]([]) == 0
+    assert fmt(src) == src
+
+
+def test_a_guard_in_a_head_on_the_line_of_the_brace():
+    src = (
+        "def depth(t: (int, int)?) -> int\n"
+        "  {n -> not n: 0\n"
+        "    1 + max(mu(n[0]), mu(n[1]))\n"
+        "  }(t)\n"
+    )
+    ns: dict = {}
+    exec(transpile(src), ns)
+    assert ns["depth"](((None, None), None)) == 2
+    assert fmt(src) == src
+
+
+def test_a_guard_in_the_head_of_a_def_with_and_without_a_return_type():
+    src = (
+        "def fib(k) -> k < 2: k\n"
+        "  fib(k - 1) + fib(k - 2)\n"
+        "\n"
+        "def fact(k: int) -> int, k == 0: 1\n"
+        '  """The factorial of k."""\n'
+        "  k * fact(k - 1)\n"
+        "\n"
+        "def pair(k: int) -> (int, int), k == 0 ? true : false: 0, 0\n"
+        "  a, b = pair(k - 1)\n"
+        "  a + 1, b + k\n"
+        "\n"
+        "def one(x: int) -> int: return x + 1\n"
+    )
+    out = transpile(src)
+    assert "def fib(k):\n    if k < 2:\n        return k\n" in out
+    assert "def fact(k: int) -> int:\n" in out
+    assert "def pair(k: int) -> tuple[int, int]:\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["fib"](10) == 55
+    assert ns["fact"](5) == 120
+    assert ns["fact"].__doc__ == "The factorial of k."
+    assert ns["pair"](3) == (3, 6)
+    assert ns["one"](1) == 2
+    assert fmt(src) == src
+
+
+def test_a_guard_in_the_head_of_a_memo_with_a_body():
+    src = (
+        "def climb(n: int) -> int\n"
+        "  memo f(i) -> i >= n: int(i == n)\n"
+        "    f(i + 1) + f(i + 2)\n"
+        "  f(0)\n"
+        "\n"
+        "def climb2(n: int) -> int\n"
+        "  memo {i -> i >= n: int(i == n)\n"
+        "    mu(i + 1) + mu(i + 2)\n"
+        "  }(0)\n"
+    )
+    ns: dict = {}
+    exec(transpile(src), ns)
+    assert ns["climb"](30) == ns["climb2"](30) == 1346269
+    assert fmt(src) == src
+
+
+def test_a_guard_in_a_head_needs_a_value():
+    with pytest.raises(MuError, match="a guard in a head needs a value"):
+        transpile("def f(k) -> k < 2:\n  f(k - 1)\n")
+
+
+def test_a_bare_arrow_ends_the_head_of_a_def_and_of_a_memo():
+    src = (
+        "def climb(n: int) ->\n"
+        "  memo f(i) ->\n"
+        "    i >= n ? int(i == n) : f(i + 1) + f(i + 2)\n"
+        "  f(0)\n"
+    )
+    out = transpile(src)
+    assert "def climb(n: int):\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["climb"](5) == 8
+    assert fmt(src) == src
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "(max(s, t), nums[i] + s) = mu(i + 1)",
+        "max(s, t), nums[i] + s = mu(i + 1)",
+        "(max(s, t), nums[i] + s) = s, t = mu(i + 1)",
+        "(max(t, s), nums[i] + s) = s, t = mu(i + 1)",
+    ],
+)
+def test_a_side_with_a_comma_and_a_value_among_its_items_is_a_value(line):
+    src = (
+        "def rob(nums: [int]) -> int\n"
+        "  n = len nums\n"
+        "  max({\n"
+        "    i -> i == n: 0, 0\n"
+        f"      {line}\n"
+        "  }(0))\n"
+    )
+    out = transpile(src)
+    assert "        s, t = _mu1(i + 1)\n        return " in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["rob"]([2, 7, 9, 3, 1]) == 12
+    assert fmt(src) == src
+
+
+def test_a_side_of_targets_and_conversions_is_still_assigned_by_position():
+    out = transpile('int(a), b, int(c) = "0:start:3".split(":")\nx, y = a + c, b\n')
+    ns: dict = {}
+    exec(out, ns)
+    assert (ns["a"], ns["b"], ns["c"], ns["x"], ns["y"]) == (0, "start", 3, 3, "start")
