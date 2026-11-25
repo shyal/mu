@@ -2217,6 +2217,107 @@ def test_a_guard_in_a_head_needs_a_value():
         transpile("def f(k) -> k < 2:\n  f(k - 1)\n")
 
 
+def test_more_guards_under_the_head_of_a_block_lambda():
+    src = (
+        "def decode(S: str) -> int\n"
+        "  memo {i -> i >= len(S): 1\n"
+        "          -> S[i] == '0': 0\n"
+        "    mu(i + 1) + (10 <= int(S[i:i + 2]) <= 26 ? mu(i + 2) : 0)\n"
+        "  }(0)\n"
+        "\n"
+        "def decode2(S: str) -> int\n"
+        "  memo {\n"
+        "    i -> i >= len(S): 1\n"
+        "      -> S[i] == '0': 0\n"
+        "      ways = mu(i + 1)\n"
+        "      if 10 <= int(S[i:i + 2]) <= 26\n"
+        "        ways += mu(i + 2)\n"
+        "      ways\n"
+        "  }(0)\n"
+        "\n"
+        "def decode3(S: str) -> int\n"
+        "  memo {i -> i >= len(S): 1\n"
+        "          -> S[i] == '0': 0\n"
+        "    | 10 <= int(S[i:i + 2]) <= 26 -> mu(i + 1) + mu(i + 2)\n"
+        "    |                             -> mu(i + 1)\n"
+        "  }(0)\n"
+    )
+    out = transpile(src)
+    assert (
+        "        def _mu1(i):\n"
+        "            if i >= len(S):\n"
+        "                return 1\n"
+        "            if S[i] == '0':\n"
+        "                return 0\n"
+        "            return _mu1(i + 1) + "
+    ) in out
+    ns: dict = {}
+    exec(out, ns)
+    for name in "decode", "decode2", "decode3":
+        got = [ns[name](s) for s in ["2", "12", "226", "06", "1262", "10", ""]]
+        assert got == [1, 2, 3, 0, 3, 1, 1]
+    assert fmt(src) == src
+
+
+def test_more_guards_under_the_head_of_a_def_and_of_a_memo():
+    src = (
+        "def fib(k: int) -> int, k == 0: 0\n"
+        "                -> k == 1: 1\n"
+        '  """The Fibonacci number k."""\n'
+        "  fib(k - 1) + fib(k - 2)\n"
+        "\n"
+        "def pair(k) -> k == 0: 0, 0\n"
+        "            -> k == 1 ? true : false: 1, 1\n"
+        "            -> k == 2: 2, 3\n"
+        "  a, b = pair(k - 1)\n"
+        "  a + 1, b + k\n"
+        "\n"
+        "def climb(n: int) -> int\n"
+        "  memo f(i) -> i == n: 1\n"
+        "            -> i > n: 0\n"
+        "    f(i + 1) + f(i + 2)\n"
+        "  f(0)\n"
+    )
+    out = transpile(src)
+    assert "    if k == 0:\n        return 0\n    if k == 1:\n        return 1\n" in out
+    ns: dict = {}
+    exec(out, ns)
+    assert ns["fib"](10) == 55
+    assert ns["fib"].__doc__ == "The Fibonacci number k."
+    assert ns["pair"](4) == (4, 10)
+    assert ns["climb"](5) == 8
+    assert fmt(src) == src
+
+
+def test_fmt_puts_each_guard_under_the_arrow_of_the_head():
+    src = (
+        "def fib(k: int) -> int, k == 0: 0\n"
+        "    ->   k == 1: 1\n"
+        "\n"
+        "  # the recurrence\n"
+        "  fib(k - 1) + fib(k - 2)\n"
+    )
+    assert fmt(src) == (
+        "def fib(k: int) -> int, k == 0: 0\n"
+        "                -> k == 1: 1\n"
+        "\n"
+        "  # the recurrence\n"
+        "  fib(k - 1) + fib(k - 2)\n"
+    )
+
+
+def test_an_arrow_line_is_a_guard_only_under_a_head_with_a_guard():
+    with pytest.raises(MuError):
+        transpile("def f(k) -> int\n         -> k < 2: k\n  f(k - 1)\n")
+    with pytest.raises(MuError, match="a guard in a head needs a value"):
+        transpile("def f(k) -> k < 1:\n         -> k < 2: k\n  f(k - 1)\n")
+    # the head of a lambda with no parameter, on the line under the brace
+    src = "def f(n: int) -> int\n  {\n    -> n == 0: 0\n      n + 1\n  }()\n"
+    ns: dict = {}
+    exec(transpile(src), ns)
+    assert (ns["f"](0), ns["f"](4)) == (0, 5)
+
+
 def test_a_bare_arrow_ends_the_head_of_a_def_and_of_a_memo():
     src = (
         "def climb(n: int) ->\n"
@@ -2263,3 +2364,47 @@ def test_a_side_of_targets_and_conversions_is_still_assigned_by_position():
     ns: dict = {}
     exec(out, ns)
     assert (ns["a"], ns["b"], ns["c"], ns["x"], ns["y"]) == (0, "start", 3, 3, "start")
+
+
+@pytest.mark.parametrize(
+    "line, python",
+    [
+        ("x = :max(3)", "x = max(x, 3)"),
+        ("x = min(hi, :max(lo))", "x = min(hi, max(x, lo))"),
+        ("x = :max(:f(y))", "x = max(x, f(x, y))"),
+        ("x = :max(lo) + :min(hi)", "x = max(x, lo) + min(x, hi)"),
+        ("x = :max(1) if :min(2) > 3 else -:abs()", "x = max(x, 1) if min(x, 2) > 3 else -abs(x)"),
+        ("x = c ? :max(1) : :min(2)", "x = max(x, 1) if c else min(x, 2)"),
+        ("x = max for y in ys: :max(y)", "x = max([max(x, y) for y in ys])"),
+        ("x = :math.gcd(4)", "x = math.gcd(x, 4)"),
+        ("x = :f(y for y in ys)", "x = f(x, (y for y in ys))"),
+        ("dp[i] = :min(dp[j] + 1)", "dp[i] = min(dp[i], dp[j] + 1)"),
+        ("a.b = :max(1)", "a.b = max(a.b, 1)"),
+        ("x = a[(:max(2))]", "x = a[(max(x, 2))]"),
+        ("x = a[:max(2)]", "x = a[:max(2)]"),
+        ("x = a[1:max(2)] + a[::max(2)]", "x = a[1:max(2)] + a[::max(2)]"),
+        ("x = c ? a : max(2)", "x = a if c else max(2)"),
+    ],
+)
+def test_a_colon_call_takes_the_target_as_its_first_argument(line, python):
+    assert transpile(line + "\n").endswith(python + "\n")
+    assert fmt(line + "\n") == line + "\n"
+
+
+@pytest.mark.parametrize(
+    "line, message",
+    [
+        ("print(:max(1))", "here there is none"),
+        ("x += :max(1)", "here there is none"),
+        ("a, b = :max(1)", "here there is none"),
+        ("a = b = :max(1)", "here there is none"),
+        ("x = {n -> :max(n)}(1)", "here there is none"),
+        ("a = :max(1) = c", "chained"),
+        ("d[st .] = :max(1)", "cannot pop or bind"),
+        ("x = sum(:max(x) for x in xs)", "binds x again"),
+        ("x = sort(xs, by=x -> :max(x))", "binds x again"),
+    ],
+)
+def test_a_colon_call_needs_one_target_that_nothing_rebinds(line, message):
+    with pytest.raises(MuError, match=message):
+        transpile(line + "\n")

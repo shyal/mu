@@ -28,7 +28,7 @@ import textwrap
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-VERSION = "0.19"
+VERSION = "0.21"
 
 KEYWORDS = {"from", "in", "not", "and", "or", "if", "else", "is", "as"}
 # names that stay Python's `is`, the identity test, on the right of `is`
@@ -193,6 +193,17 @@ def guard_head(lines, k, pos):
     return bool(m) and guard_colon(lines[k], m.end()) and deeper_next(lines, k)
 
 
+ALSO = re.compile(r"\s*->")  # a line that starts with `->`
+
+
+def more_guard(line):
+    """Whether this line is one more guard of the head above it, `-> guard:
+    value`. The line above has a guard in a head, and this line stands
+    right of the start of that line."""
+    m = ALSO.match(line)
+    return bool(m) and guard_colon(line, m.end())
+
+
 class Brackets(list):
     """The open brackets of a program, innermost last, over the indents of
     its open blocks. A bracket is its character. A brace that opens a block
@@ -262,8 +273,11 @@ def tokenize(src, primes=frozenset()):
     bound. Inside brackets lines run on, except after a `{` that ends its
     line as a lambda head, `{p ->`: that brace opens a block, and the lines
     under it are marked like any other, whatever brackets are open around
-    the brace. The brackets go back to running lines on at its `}`."""
+    the brace. The brackets go back to running lines on at its `}`. A line
+    `-> guard: value` under a head with a guard is one more guard of that
+    head: the head runs on, and the `->` of the line is an ALSO token."""
     toks, indents, depth = [], [0], 0
+    guards = False  # the line above has a guard in a head
     stack = Brackets(indents)
     lines, k = src.splitlines(), -1
     while k + 1 < len(lines):
@@ -274,14 +288,25 @@ def tokenize(src, primes=frozenset()):
             if not body or body.startswith("#"):
                 continue
             ind = len(line) - len(line.lstrip(" "))
-            if ind > indents[-1]:
-                indents.append(ind)
-                toks.append(("INDENT", "", n))
-            while ind < indents[-1]:
-                stack.leave(n)
-                toks.append(("DEDENT", "", n))
-            if ind != indents[-1]:
-                raise MuError(f"line {n}: {stack.mismatch(body)}")
+            also = guards and ind > indents[-1] and more_guard(line)
+            guards = False
+            if also:
+                toks.pop()  # the NEWLINE of the line above: the head runs on
+                start = line.index("->")
+                val = Col("\n->")
+                val.col = start
+                toks.append(("ALSO", val, n))
+                line = " " * (start + 2) + line[start + 2 :]
+                guards = True
+            else:
+                if ind > indents[-1]:
+                    indents.append(ind)
+                    toks.append(("INDENT", "", n))
+                while ind < indents[-1]:
+                    stack.leave(n)
+                    toks.append(("DEDENT", "", n))
+                if ind != indents[-1]:
+                    raise MuError(f"line {n}: {stack.mismatch(body)}")
         pos = 0
         while pos < len(line):
             long = triple(lines, k, pos)
@@ -310,6 +335,8 @@ def tokenize(src, primes=frozenset()):
                     stack.append(val)
             elif val in ")]}":
                 depth = stack.close(depth, n)
+            elif val == "->" and depth == 0 and not guards:
+                guards = guard_colon(line, pos)
             toks.append((kind.upper(), val, n))
         if depth == 0 and toks and toks[-1][0] not in ("NEWLINE", "INDENT", "DEDENT"):
             toks.append(("NEWLINE", "", n))
@@ -323,6 +350,7 @@ class Py(str):
     div = None  # (a, b) when the expression is exactly a / b
     rng = None  # (lo, hi_exclusive) when the expression is a range
     parts = None  # the member types when a type is a parenthesized tuple
+    gen = False  # a generator argument, `y for y in ys`, unbracketed
     call = False  # a call that dropped its brackets, `f x`
     pair = False  # a `k: v` or `**d` item of a dict
     repeats = None  # [(item, copies)] when a right side of = repeats, `[]..`
@@ -935,6 +963,8 @@ class Parser:
         self.pending = []  # Hoisted defs for the statement being parsed
         self.mu = []  # the hidden name of each open block lambda, innermost last
         self.hoisted = 0  # how many hidden defs are named so far
+        self.given = None  # the target of the `=` being parsed, for `:f(y)`
+        self.gave = False  # whether its right side has used it
 
     # token helpers
 
@@ -1053,6 +1083,13 @@ class Parser:
 
     def block(self):
         """An indented block, or one statement after ':' on the same line."""
+        held, self.given = self.given, None
+        try:
+            return self.block_body()
+        finally:
+            self.given = held
+
+    def block_body(self):
         if self.at(":"):
             self.next()
             return flat(self.placed(self.simple(), len(self.pending)))
@@ -1304,11 +1341,7 @@ class Parser:
                     self.known[-1] |= set(NAME.findall(head[2])) | targets(lhs)
                     body = self.lifted(self.block(), head[2])
                     return ("assign_fold", lhs, op, head, body)
-                rhs = (
-                    self.arg()
-                    if op == "=" and self.lambda_ahead()
-                    else self.exprlist(repeat=op == "=")
-                )
+                rhs = self.right_side(lhs, op, line)
                 sides = [lhs]
                 while op == "=" and self.at("="):
                     # chained: `a = b = 0` keeps every target in lhs
@@ -1338,6 +1371,59 @@ class Parser:
         if newline or self.peek()[0] == "NEWLINE":
             self.expect_kind("NEWLINE")
         return s
+
+    def right_side(self, lhs, op, line):
+        """The right of `lhs op`. After one target and a plain `=`, `:f(y)`
+        in it is `f(lhs, y)`."""
+        held = self.given, self.gave
+        self.given, self.gave = lhs if op == "=" and one_target(lhs) else None, False
+        try:
+            if op == "=" and self.lambda_ahead():
+                rhs = self.arg()
+            else:
+                rhs = self.exprlist(repeat=op == "=")
+            if self.gave:
+                if self.at("="):
+                    raise MuError(f"line {line}: `:f(y)` cannot be in a chained `=`")
+                if ".pop()" in lhs or ":=" in lhs:
+                    raise MuError(
+                        f"line {line}: `{lhs}` is read and then assigned by `:f(y)`;"
+                        " it cannot pop or bind"
+                    )
+                again = targets(lhs) | set(NAME.findall(lhs))
+                again &= rebound(rhs)
+                if again:
+                    raise MuError(
+                        f"line {line}: `:f(y)` reads {min(again)} of `{lhs}`, and the"
+                        f" right side binds {min(again)} again; use another name there"
+                    )
+            return rhs
+        finally:
+            self.given, self.gave = held
+
+    def given_ahead(self, k=0):
+        """Whether `:f(` or `:a.f(` starts at the k-th token from here."""
+        if not (self.at(":", k) and self.peek(k + 1)[0] == "NAME"):
+            return False
+        k += 2
+        while self.at(".", k) and self.peek(k + 1)[0] == "NAME":
+            k += 2
+        return self.at("(", k)
+
+    def given_call(self):
+        """`:f(y)` on the right of `x = `: f(x, y)."""
+        line = self.next()[2]
+        if self.given is None:
+            raise MuError(
+                f"line {line}: `:f(y)` is f(x, y) on the right of `x = `,"
+                " with one target; here there is none"
+            )
+        self.gave = True
+        fn = self.primary()
+        while self.at("."):
+            self.next()
+            fn = Py(f"{fn}.{self.next()[1]}")
+        return self.call(fn, Py(self.given))
 
     def fold_block_ahead(self):
         """Whether a fold with a block starts here: `sum for ...` or `sum
@@ -1581,11 +1667,19 @@ class Parser:
 
     def guard(self):
         """`guard: value` in a head: the function returns the value when
-        the guard holds, and runs its body when it does not."""
+        the guard holds, and runs its body when it does not. Each line `->
+        guard: value` under the head is one more guard, tried in order."""
+        guards = [self.one_guard()]
+        while self.peek()[0] == "ALSO":
+            self.next()
+            guards.append(self.one_guard())
+        return guards
+
+    def one_guard(self):
         line = self.peek()[2]
         guard = self.expr()
         self.expect(":")
-        if self.peek()[0] == "NEWLINE":
+        if self.peek()[0] in ("NEWLINE", "ALSO"):
             raise MuError(f"line {line}: a guard in a head needs a value: `guard: value`")
         return ("if", [(guard, [("return", self.exprlist())])], None)
 
@@ -1847,7 +1941,7 @@ class Parser:
         e = self.or_()
         if self.at("?"):
             return self.ternary(e)
-        if self.at("if") and not self.at(":", 1):
+        if self.at("if") and (not self.at(":", 1) or self.given_ahead(1)):
             self.next()
             cond = self.or_()
             if e.orparts and not self.at("else"):
@@ -2226,6 +2320,8 @@ class Parser:
             if (val in HELPERS and val not in self.imported) or val in self.native:
                 self.bare.add(val)
             return Py(CONSTANTS.get(val, val))
+        if self.given_ahead():
+            return self.given_call()
         if val == "(":
             self.next()
             if self.at(")"):
@@ -2272,6 +2368,13 @@ class Parser:
         return self.toks[j][1] == ")" and self.toks[j + 1][1] == "->"
 
     def block_lambda(self, memo=False):
+        held, self.given = self.given, None
+        try:
+            return self.block_lambda_body(memo)
+        finally:
+            self.given = held
+
+    def block_lambda_body(self, memo=False):
         """`{p -> body}`: a function with no name of its own. The body is
         an expression on the line, or a block under the `->` closed by a
         `}` at the indent of the line that opened it; its last line is the
@@ -2443,9 +2546,9 @@ class Parser:
             self.hoisted_reads(mark, ", ".join(tgts), line)
         return out
 
-    def call(self, fn):
+    def call(self, fn, *given):
         self.expect("(")
-        args, kwargs = [], []
+        args, kwargs = list(given), []
         while not self.at(")"):
             if self.peek()[1] in ("+", "*") and self.peek(1)[1] in (",", ")"):
                 args.append(Py(self.next()[1]))
@@ -2464,6 +2567,8 @@ class Parser:
             if not self.at(")"):
                 self.expect(",")
         self.expect(")")
+        if given:  # no longer the one argument, so Python needs its brackets
+            args = [Py(f"({a})") if a.gen else a for a in args]
         return self.special(fn, args, kwargs)
 
     def lambda_ahead(self):
@@ -2523,7 +2628,9 @@ class Parser:
         mark = len(self.pending)
         e = self.expr()
         if self.at("for"):
-            return Py(f"{e}{self.comprehension(mark)}")
+            out = Py(f"{e}{self.comprehension(mark)}")
+            out.gen = True
+            return out
         return e
 
     def key_of(self, by):
@@ -2926,6 +3033,29 @@ def iterable(it, wrap):
     return it
 
 
+def one_target(lhs):
+    """Whether lhs is one name, attribute or subscript."""
+    try:
+        e = ast.parse(lhs, mode="eval").body
+    except SyntaxError:
+        return False
+    return isinstance(e, (ast.Name, ast.Attribute, ast.Subscript))
+
+
+def rebound(rhs):
+    """The names the expression rhs binds: the targets of its comprehensions,
+    the arguments of its lambdas and the names of its `:=`."""
+    try:
+        tree = ast.parse(f"_ = {rhs}")
+    except SyntaxError:
+        return set()
+    out = {n.arg for n in ast.walk(tree) if isinstance(n, ast.arg)}
+    for n in ast.walk(tree.body[0].value):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            out.add(n.id)
+    return out
+
+
 def targets(lhs):
     """The plain names an assignment's left side binds: `a, b = c = ...`."""
     return {
@@ -2969,12 +3099,12 @@ def bound(stmts, params=False):
 
 
 def guarded(guard, body):
-    """The body of a function whose head has a guard: the guard is its
-    first statement, after a docstring."""
+    """The body of a function whose head has guards: the guards are its
+    first statements, after a docstring."""
     if guard is None:
         return body
     doc = len(body) > 1 and body[0][0] == "expr" and bool(DOC.match(body[0][1]))
-    return body[:doc] + [guard] + body[doc:]
+    return body[:doc] + guard + body[doc:]
 
 
 def is_memo(s):
@@ -3593,6 +3723,8 @@ def gap(prev, cur, unary, subscript, paren=False):
     """The spacing written between two tokens on one line. Inside round
     brackets `=` names an argument and is tight: f(xs, by=key)."""
     (pk, pv), (ck, cv) = prev, cur
+    if pk == "GIVEN":
+        return ""
     if paren and "=" in (pv, cv) and "OP" in (pk, ck):
         if (pk, pv) == ("OP", "=") or (ck, cv) == ("OP", "="):
             return ""
@@ -3640,6 +3772,37 @@ def pop_dots(toks):
 TYPE_AFTER_Q = {",", ")", "]", "}", "=", "->", ":"}
 
 
+def mark_given(toks):
+    """The `:` of `:f(y)` where a value starts is marked GIVEN, so the
+    formatter keeps it tight to f. The `:` of a slice and of `{:list}`, and
+    the `:` after a value, stay an OP."""
+    out, stack, prev = list(toks), [], None
+    for k, t in enumerate(toks):
+        if t[0] in ("NL", "COMMENT"):
+            continue
+        value = prev is not None and (
+            prev[0] in ("NUM", "STR", "PRIME", "POP")
+            or prev[0] == "NAME" and prev[1] not in STATEMENT_WORDS | KEYWORDS
+            or prev[0] == "OP" and prev[1] in (")", "]", "}")
+        )
+        if t[0] == "OP" and t[1] in "([{":
+            stack.append("slice" if t[1] == "[" and value else t[1])
+        elif t[0] == "OP" and t[1] in ")]}" and stack:
+            stack.pop()
+        elif t == ("OP", ":") and prev is not None and not value:
+            inner = stack[-1] if stack else ""
+            j = k + 1
+            named = j < len(toks) and toks[j][0] == "NAME"
+            while named and toks[j + 1 : j + 2] == [("OP", ".")] and toks[j + 2 : j + 3] and toks[j + 2][0] == "NAME":
+                j += 2
+            named = named and toks[j + 1 : j + 2] == [("OP", "(")]
+            first = inner == "slice" and prev[1] in ("[", ":", ",") or prev == ("OP", "{")
+            if named and not first and prev[1] not in ("else", "try", "finally", "except"):
+                out[k] = ("GIVEN", ":")
+        prev = out[k]
+    return out
+
+
 def mark_ternaries(toks):
     """A `?` that starts an expression, and the `:` that answers it, are
     marked TERN so the formatter spaces them: `c ? a : b`. A `?` that ends a
@@ -3655,7 +3818,7 @@ def mark_ternaries(toks):
             depth -= 1
         elif val == "?":
             nxt = toks[k + 1] if k + 1 < len(toks) else None
-            if nxt and nxt[0] != "COMMENT" and nxt[1] not in TYPE_AFTER_Q:
+            if nxt and nxt[0] != "COMMENT" and (nxt[0] == "GIVEN" or nxt[1] not in TYPE_AFTER_Q):
                 out[k] = ("TERN", "?")
                 open_at.append(depth)
         elif val == ":" and open_at and open_at[-1] == depth:
@@ -3674,7 +3837,7 @@ def render(toks, level=0):
     seen = []  # the values of the last tokens, for the mark in `for >i, +p`
     if toks and toks[0] == ("OP", "@"):
         toks = [("DECO", "@")] + list(toks[1:])  # a decorator, not a matmul
-    for t in pop_dots(mark_ternaries(toks)):
+    for t in pop_dots(mark_ternaries(mark_given(toks))):
         if t[0] == "NL":
             out.append("\n")
             prev, unary, row = None, False, row + 1
@@ -3757,6 +3920,14 @@ def top_arrow(text):
         if depth == 0 and text.startswith(" -> ", i):
             return i
     return -1
+
+
+def guard_arrow(text):
+    """Index of the `->` that a guard follows in this line of a head."""
+    i = text.find("->")
+    while i >= 0 and not guard_colon(text, i + 2):
+        i = text.find("->", i + 2)
+    return i
 
 
 def align_cases(lines):
@@ -3849,6 +4020,7 @@ def fmt(src):
     # continues a statement, and that line is joined to the one above or
     # is indented one step per open bracket
     shifts = []
+    guards = also = False  # the line above has a guard in a head; this line is one more
     rows, k = src.splitlines(), -1
     while k + 1 < len(rows):
         k += 1
@@ -3864,16 +4036,19 @@ def fmt(src):
                 level = sum(1 for d in indents[1:] if d <= ind) + (ind > indents[-1])
                 level += shifts[-1] if shifts else 0
             else:
-                if ind > indents[-1]:
-                    indents.append(ind)
-                while ind < indents[-1]:
-                    stack.leave(n)
-                if ind != indents[-1]:
-                    raise MuError(f"line {n}: {stack.mismatch(body)}")
-                level = len(indents) - 1 + (shifts[-1] if shifts else 0)
+                also = guards and ind > indents[-1] and more_guard(line)
+                guards = also
+                if not also:
+                    if ind > indents[-1]:
+                        indents.append(ind)
+                    while ind < indents[-1]:
+                        stack.leave(n)
+                    if ind != indents[-1]:
+                        raise MuError(f"line {n}: {stack.mismatch(body)}")
+                    level = len(indents) - 1 + (shifts[-1] if shifts else 0)
             if level == 0 and not body.startswith(("#", "@")):
                 in_class = body.startswith("class ")
-            if lines and (blank or set_apart(lines[-1], level, body, in_class)):
+            if lines and not also and (blank or set_apart(lines[-1], level, body, in_class)):
                 lines.append(None)
             blank = False
         pos, glue = 0, -1  # glue: where a number just ended
@@ -3902,6 +4077,8 @@ def fmt(src):
                 if stack and isinstance(stack[-1], tuple):
                     shifts.pop()
                 depth = stack.close(depth, n)
+            elif val == "->" and depth == 0 and not guards and not m.lastgroup == "comment":
+                guards = guard_colon(line, pos)
             if m.lastgroup == "name" and buf and buf[-1][0] == "NUM" and glue == m.start():
                 buf[-1] = ("NUM", buf[-1][1] + val)  # `2x` stays one token
                 continue
@@ -3909,6 +4086,13 @@ def fmt(src):
             glue = pos if m.lastgroup == "num" else -1
         if depth and buf and buf[-1][0] != "NL":
             buf.append(("NL", ""))  # a line break inside brackets is kept
+        if depth == 0 and buf and also:
+            # one more guard goes under the `->` of the head, in its entry
+            at, text = lines[-1]
+            last = text.rsplit("\n", 1)[-1]
+            col = guard_arrow(last) + (0 if "\n" in text else 2 * at)
+            lines[-1] = (at, text + "\n" + " " * col + render(kept_breaks(buf, at), at))
+            buf, also = [], False
         if depth == 0 and buf:
             at = level
             while buf:  # `if c: stmt` becomes a header and an indented body

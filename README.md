@@ -148,6 +148,32 @@ class Solution:
 </details>
 
 ```mu
+class Solution
+  def decodeVariations(S: str) -> int
+    memo {i -> i >= len(S): 1
+            -> int(S[i]) == 0: 0
+      |     -> mu(i + 1) + (mu(i + 2) if 10 <= int(S[i:i+2]) <= 26 else 0)
+    }(0)
+```
+
+<details><summary>python</summary>
+
+```python
+class Solution:
+    def decodeVariations(self, S: str) -> int:
+        @cache
+        def _mu1(i):
+            if i >= len(S):
+                return 1
+            if int(S[i]) == 0:
+                return 0
+            return _mu1(i + 1) + (_mu1(i + 2) if 10 <= int(S[i:i + 2]) <= 26 else 0)
+        return _mu1(0)
+```
+
+</details>
+
+```mu
 # 53. Maximum Subarray (Kadane's algorithm)
 class Solution
   def maxSubArray(nums: [int]) -> int
@@ -1335,7 +1361,7 @@ mu-repl           # a REPL
 
 ## Spec
 
-The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md), [v0.14](spec/v0.14.md), [v0.15](spec/v0.15.md), [v0.16](spec/v0.16.md), [v0.17](spec/v0.17.md), [v0.18](spec/v0.18.md), [v0.19](spec/v0.19.md).
+The language is specified one version at a time: [v0.1](spec/v0.1.md), [v0.2](spec/v0.2.md), [v0.3](spec/v0.3.md), [v0.4](spec/v0.4.md), [v0.5](spec/v0.5.md), [v0.6](spec/v0.6.md), [v0.7](spec/v0.7.md), [v0.8](spec/v0.8.md), [v0.9](spec/v0.9.md), [v0.10](spec/v0.10.md), [v0.11](spec/v0.11.md), [v0.12](spec/v0.12.md), [v0.13](spec/v0.13.md), [v0.14](spec/v0.14.md), [v0.15](spec/v0.15.md), [v0.16](spec/v0.16.md), [v0.17](spec/v0.17.md), [v0.18](spec/v0.18.md), [v0.19](spec/v0.19.md), [v0.20](spec/v0.20.md), [v0.21](spec/v0.21.md).
 
 ## Profiles
 
