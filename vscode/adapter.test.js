@@ -75,6 +75,50 @@ test("a step that stays on the same mu line is repeated, one that moves is repor
   assert.equal(r.messages[0].event, "stopped");
 });
 
+test("a step over that stops on a python line with no mu line steps out", () => {
+  const rw = new Rewriter(MAP, PY, MU);
+  // the client saw the stack at mu line 5, depth 3, then stepped over its return
+  rw.toAdapter({ seq: 5, type: "request", command: "stackTrace", arguments: { threadId: 1 } });
+  rw.toClient({ seq: 6, type: "response", request_seq: 5, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 13, source: { path: PY } }], totalFrames: 3 } });
+  rw.toAdapter({ seq: 7, type: "request", command: "next", arguments: { threadId: 1 } });
+  // debugpy stopped on python line 4, in a pasted helper: no mu line
+  let r = rw.toClient({ seq: 8, type: "event", event: "stopped", body: { reason: "step", threadId: 1 } });
+  const own = r.requests[0].seq;
+  r = rw.toClient({ seq: 9, type: "response", request_seq: own, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 4, source: { path: PY } }], totalFrames: 2 } });
+  assert.deepEqual(r.messages, []);
+  assert.deepEqual([r.requests[0].command, r.requests[0].arguments.threadId], ["stepOut", 1]);
+  // back on python line 10: mu line 3, the stop is released
+  r = rw.toClient({ seq: 10, type: "event", event: "stopped", body: { reason: "step", threadId: 1 } });
+  const own2 = r.requests[0].seq;
+  r = rw.toClient({ seq: 11, type: "response", request_seq: own2, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 10, source: { path: PY } }], totalFrames: 1 } });
+  assert.deepEqual(r.requests, []);
+  assert.equal(r.messages[0].event, "stopped");
+});
+
+test("a step in that stops on a python line with no mu line steps in again", () => {
+  const rw = new Rewriter(MAP, PY, MU);
+  rw.toAdapter({ seq: 5, type: "request", command: "stackTrace", arguments: { threadId: 1 } });
+  rw.toClient({ seq: 6, type: "response", request_seq: 5, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 13, source: { path: PY } }], totalFrames: 2 } });
+  rw.toAdapter({ seq: 7, type: "request", command: "stepIn", arguments: { threadId: 1 } });
+  let r = rw.toClient({ seq: 8, type: "event", event: "stopped", body: { reason: "step", threadId: 1 } });
+  const own = r.requests[0].seq;
+  r = rw.toClient({ seq: 9, type: "response", request_seq: own, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 4, source: { path: PY } }], totalFrames: 3 } });
+  assert.deepEqual(r.messages, []);
+  assert.equal(r.requests[0].command, "stepIn");
+});
+
+test("a step that stops in another file is reported", () => {
+  const rw = new Rewriter(MAP, PY, MU);
+  rw.toAdapter({ seq: 5, type: "request", command: "stackTrace", arguments: { threadId: 1 } });
+  rw.toClient({ seq: 6, type: "response", request_seq: 5, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 13, source: { path: PY } }], totalFrames: 2 } });
+  rw.toAdapter({ seq: 7, type: "request", command: "stepIn", arguments: { threadId: 1 } });
+  let r = rw.toClient({ seq: 8, type: "event", event: "stopped", body: { reason: "step", threadId: 1 } });
+  const own = r.requests[0].seq;
+  r = rw.toClient({ seq: 9, type: "response", request_seq: own, command: "stackTrace", success: true, body: { stackFrames: [{ id: 1, line: 4, source: { path: "/py/helper.py" } }], totalFrames: 3 } });
+  assert.deepEqual(r.requests, []);
+  assert.equal(r.messages[0].event, "stopped");
+});
+
 test("a stop for a breakpoint or exception is never held", () => {
   const rw = new Rewriter(MAP, PY, MU);
   for (const reason of ["breakpoint", "exception", "pause", "entry"]) {
@@ -142,14 +186,16 @@ const TWO_SUM = `class Solution
 
 // console: internalConsole runs the solve under the adapter; integratedTerminal
 // makes the adapter ask the client to run the launcher, which the test does.
-for (const console of ["internalConsole", "integratedTerminal"]) live(`stepping through a solve stays on current.mu, one stop per mu line (${console})`, async () => {
+// A debug session on a solve in a scratch folder: problem is current.py,
+// [stubBody, body] replaces the stub's method, drive(s) steps through it.
+async function session(problem, stubBody, body, console, drive) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mu-debug-"));
-  fs.writeFileSync(path.join(dir, "current.py"), PROBLEM);
+  fs.writeFileSync(path.join(dir, "current.py"), problem);
   const env = { ...process.env, PYTHONPATH: [ROOT, path.join(ROOT, "utils"), path.join(ROOT, "utils", "harness")].join(path.delimiter) };
   const session = path.join(ROOT, "mu", "session.py");
   execFileSync(VENV, [session, "stub"], { cwd: dir, env });
   const stub = fs.readFileSync(path.join(dir, "current.mu"), "utf8");
-  const work = stub.replace("class Solution\n  def twoSum(nums: [int], target: int) -> [int]\n    pass\n", TWO_SUM).replace("# assert", "assert");
+  const work = stub.replace(stubBody, body).replace("# assert", "assert");
   fs.writeFileSync(path.join(dir, "current.mu"), work);
   const target = execFileSync(VENV, [session, "debug"], { cwd: dir, env }).toString().trim();
   assert.equal(target, ".mu_current.py");
@@ -215,6 +261,20 @@ for (const console of ["internalConsole", "integratedTerminal"]) live(`stepping 
     await request("initialize", { adapterID: "mu", clientID: "test", linesStartAt1: true, columnsStartAt1: true, pathFormat: "path", supportsRunInTerminalRequest: true });
     const launch = request("launch", { type: "python", request: "launch", name: "t", program: pyPath, python: [VENV], cwd: dir, console, justMyCode: false });
     await until((m) => m.type === "event" && m.event === "initialized");
+    const threadId = await drive({ request, until, stopped, top, at, muPath, launch });
+    await request("continue", { threadId });
+    await until((m) => m.type === "event" && (m.event === "terminated" || m.event === "exited"));
+  } finally {
+    child.kill();
+    for (const p of children) p.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const TWO_SUM_STUB = "class Solution\n  def twoSum(nums: [int], target: int) -> [int]\n    pass\n";
+
+for (const console of ["internalConsole", "integratedTerminal"]) live(`stepping through a solve stays on current.mu, one stop per mu line (${console})`, () =>
+  session(PROBLEM, TWO_SUM_STUB, TWO_SUM, console, async ({ request, stopped, top, at, muPath, launch }) => {
     const bps = await request("setBreakpoints", { source: { path: muPath }, breakpoints: [{ line: at("    seen = {}") }] });
     assert.equal(bps.body.breakpoints[0].verified, true);
     assert.equal(path.basename(bps.body.breakpoints[0].source.path), "current.mu");
@@ -236,12 +296,57 @@ for (const console of ["internalConsole", "integratedTerminal"]) live(`stepping 
       walk.push((await top(threadId))[1]);
     }
     assert.deepEqual(walk, [at("    for >i, x in nums"), at("      if target - x in seen"), at("      seen[x] = i"), at("    for >i, x in nums")]);
+    return threadId;
+  }));
 
-    await request("continue", { threadId });
-    await until((m) => m.type === "event" && (m.event === "terminated" || m.event === "exited"));
-  } finally {
-    child.kill();
-    for (const p of children) p.kill();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
+const CLIMB = `"""
+URL: https://leetcode.com/problems/climbing-stairs/description/
+
+70. Climbing Stairs
+
+Return the number of distinct ways to climb n steps, one or two at a time.
+"""
+
+
+class Solution:
+    def climbStairs(self, n: int) -> int:
+        pass
+
+
+sol = Solution()
+
+# assert sol.climbStairs(2) == 2
+`;
+
+const CLIMB_STUB = "class Solution\n  def climbStairs(n: int) -> int\n    pass\n";
+
+const CLIMB_MEMO = `class Solution
+  def climbStairs(n: int) -> int
+    memo f(i) -> i >= n: int(i == n)
+      f(i + 1) + f(i + 2)
+    f(0)
+`;
+
+// the memo is wrapped by the pasted cache helper: no step stops in it
+live("stepping through a memo never stops in the cache helper", () =>
+  session(CLIMB, CLIMB_STUB, CLIMB_MEMO, "internalConsole", async ({ request, stopped, top, at, muPath, launch }) => {
+    await request("setBreakpoints", { source: { path: muPath }, breakpoints: [{ line: at("    f(0)") }] });
+    await request("configurationDone");
+    await launch;
+    let ev = await stopped();
+    const threadId = ev.body.threadId;
+    assert.deepEqual(await top(threadId), ["current.mu", at("    f(0)")]);
+    await request("setBreakpoints", { source: { path: muPath }, breakpoints: [] });
+    // step in: f(0), its body, f(1); step over: the body of f(1), its return
+    // back to the body of f(0) (the call to f(2) is next), the return of f(0)
+    const walk = [];
+    for (const command of ["stepIn", "stepIn", "stepIn", "next", "next", "next"]) {
+      await request(command, { threadId });
+      ev = await stopped();
+      walk.push(await top(threadId));
+    }
+    const body = ["current.mu", at("      f(i + 1) + f(i + 2)")];
+    const head = ["current.mu", at("    memo f(i) -> i >= n: int(i == n)")];
+    assert.deepEqual(walk, [head, body, head, body, body, ["current.mu", at("    f(0)")]]);
+    return threadId;
+  }));

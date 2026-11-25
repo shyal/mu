@@ -5,7 +5,9 @@
 // first Python line that mu line produced. Towards VS Code, a stack frame
 // in the transpiled file is reported at its mu line, in the mu file. A
 // step that lands on another Python line of the same mu line is repeated,
-// so one step is one mu line. Nothing else is touched.
+// so one step is one mu line. A step that lands on a Python line with no
+// mu line (a pasted helper such as cache) is repeated too, so a step never
+// stops in code that is not in the mu file. Nothing else is touched.
 //
 // Rewriter is pure: it knows the map and the two paths, and takes and
 // returns protocol messages. The transport is in the extension.
@@ -107,9 +109,11 @@ class Rewriter {
       const top = frames[0];
       if (threadId !== undefined && top) {
         const topMu = top.source && this.same(top.source.path, this.muPath) ? top.line : null;
+        // still in the transpiled file after the rewrite: a line no mu line made
+        const unmapped = !!(top.source && this.same(top.source.path, this.pyPath));
         const depth = msg.body.totalFrames !== undefined ? msg.body.totalFrames : frames.length;
         this.topLine.set(threadId, { muLine: topMu, depth });
-        if (own) return this.afterOwnStack(threadId, topMu, depth);
+        if (own) return this.afterOwnStack(threadId, topMu, depth, unmapped);
       }
       return { messages: [{ ...msg, body: { ...msg.body, stackFrames: frames } }], requests: [] };
     }
@@ -140,15 +144,19 @@ class Rewriter {
   }
 
   // The proxy's own stackTrace came back after a step: on the same mu line
-  // at the same depth, step once more; otherwise release the stopped event.
-  afterOwnStack(threadId, topMu, depth) {
+  // at the same depth, step once more; on a Python line with no mu line, step
+  // in again after a step in, else step out to the mu code that called it;
+  // otherwise release the stopped event.
+  afterOwnStack(threadId, topMu, depth, unmapped) {
     const held = this.held;
     this.held = null;
     const step = this.lastStep.get(threadId);
     if (!held) return { messages: [], requests: [] };
-    if (step && topMu !== null && topMu === step.muLine && depth === step.depth) {
+    const same = step && topMu !== null && topMu === step.muLine && depth === step.depth;
+    if (step && (same || unmapped)) {
       const seq = this.nextSeq++;
-      return { messages: [], requests: [{ seq, type: "request", command: step.command, arguments: step.args }] };
+      const command = unmapped && step.command !== "stepIn" ? "stepOut" : step.command;
+      return { messages: [], requests: [{ seq, type: "request", command, arguments: step.args }] };
     }
     return { messages: [held.event], requests: [] };
   }
